@@ -58,6 +58,16 @@ DIGEST_DIR = os.path.join(WATCH, "state", "task-digests")
 FAIL_STATUSES = ("failed", "error", "aborted", "timeout", "crashed")
 QUIET_STATUSES = ("cancelled",)
 
+# A run row is written when the run *starts* (`status = running`), and
+# `future task runs` lists it right away (the query has no status filter). So a poll
+# taken mid-run sees a row that has not finished yet — and if it were accepted as
+# final, two things would go wrong: the run would be counted toward a review before
+# its outcome existed, and its id would be remembered as "seen", so a failure
+# arriving minutes later could never be reported. That is exactly the case this
+# feature is for, and it was live for one hour (measured: the 01:16 hourly run was
+# in flight from 01:16:10 to 01:30:35, polled every 120 s throughout).
+UNFINISHED_STATUSES = ("running", "pending", "queued", "starting", "")
+
 # Lines a run writes about itself that are *not* a result: what it could not verify,
 # what it skipped, what it wants from the user. They are the raw material of a prompt
 # fix, so `digest` counts them across runs rather than printing them once.
@@ -207,7 +217,12 @@ def collect(cfg=None, state=None, now_ms=None, force=False, fetch=True):
         rec["trigger"] = t.get("trigger")
         runs = fetch_runs(cfg, tid, limit=max(every * 3, 20))
         seen = set(rec.get("seenRunIds") or [])
-        unseen = [r for r in runs if r.get("id") and r["id"] not in seen]
+        # Only settled runs are facts. An in-flight one is neither counted nor
+        # remembered (see UNFINISHED_STATUSES): it will be picked up by a later poll
+        # once it has a real outcome.
+        unseen = [r for r in runs
+                  if r.get("id") and r["id"] not in seen
+                  and (r.get("status") or "").lower() not in UNFINISHED_STATUSES]
         for r in reversed(unseen):  # oldest first, so counters accumulate in order
             seen.add(r["id"])
             if fresh_task:

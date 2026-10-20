@@ -157,6 +157,28 @@ def main() -> int:
     check("event ids differ per run",
           mod.event_id("task_run_failed", "trn_a") != mod.event_id("task_run_failed", "trn_b"))
 
+    # 10b. an in-flight run is not a fact yet: it must not be counted toward a
+    # review, and above all must not be remembered as seen — otherwise a failure
+    # that arrives minutes later can never be reported (the whole point).
+    st4 = {}
+    led4 = [run("c1")]
+    mod.fetch_runs = lambda _cfg, _tid, limit=20: list(reversed(led4))
+    mod.collect({"task_review_every_runs": 6, "task_poll_seconds": 0}, state=st4,
+                now_ms=40_000, force=True, fetch=True)  # baseline
+    led4.append(run("c2", "running", ""))
+    ev5, st4 = mod.collect({"task_review_every_runs": 6, "task_poll_seconds": 0},
+                           state=st4, now_ms=41_000, force=True, fetch=True)
+    check("an in-flight run is not counted", st4["tasks"]["tsk_demo"]["runsSinceReview"] == 0,
+          f"{st4['tasks']['tsk_demo']['runsSinceReview']}")
+    check("an in-flight run is not marked seen",
+          "c2" not in st4["tasks"]["tsk_demo"]["seenRunIds"], f"{st4['tasks']['tsk_demo']['seenRunIds']}")
+    check("an in-flight run is not an event", ev5 == [], f"{[e['kind'] for e in ev5]}")
+    led4[-1] = run("c2", "failed", "", err="502 after the fact")
+    ev6, st4 = mod.collect({"task_review_every_runs": 6, "task_poll_seconds": 0},
+                           state=st4, now_ms=42_000, force=True, fetch=True)
+    check("the same run reported once it settles",
+          [e["kind"] for e in ev6] == ["task_run_failed"], f"{[e['kind'] for e in ev6]}")
+
     # 11. the wiring: events only matter if the scanner actually asks for them and
     # puts them in the same list it writes to inbox/pending.jsonl, and if the wake
     # gate treats a medium event as notify-worthy (it does: NOTIFY_PRIORITY).
