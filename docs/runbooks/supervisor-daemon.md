@@ -19,6 +19,7 @@
 | Linux | systemd · `--user` unit | `Restart=always`、`WantedBy=default.target`，另需 `loginctl enable-linger` 让用户会话退出后仍跑 |
 | Windows | 任务计划程序（登录时触发）或 WSL 内的 systemd | 动作必须是 `bash.exe <本仓>/bin/watchd.sh`，**需要 Git Bash 或 WSL**（见下） |
 | 任意 | 无调度器 | `nohup bash bin/watchd.sh &`；机器重启后要手动再来一次 |
+| 任意 | FutureOS 自己的定时任务 | 零系统配置，但**需要桌面端在跑**；每次探活是一次 agent 运行（会花钱），见下 |
 
 ### macOS（launchd）
 
@@ -110,6 +111,30 @@ journalctl --user -u session-watch -n 50
    Windows 侧查不到，`liveness.py` 会把活着的守护进程报成"未运行"。
    `bin/watchd.sh` 用 `/proc/$$/winpid` 写原生 pid；看到 `pid=XXXX` 与
    `Get-CimInstance Win32_Process -Filter "Name='bash.exe'"` 的 `ProcessId` 对得上才算对。
+
+### 任意平台：用 FutureOS 自己的定时任务（不要系统调度器）
+
+不想在系统里装任何东西时，可以让一条**定时任务**每 N 分钟替你看一眼。
+`prompts/keepalive.md` 就是它的提示词：跑 `python3 bin/liveness.py`，健康就**什么都不做**
+并回三行；不健康就 `--ensure` 拉起、写 `journal/` 一行、仍失败再 `notice.py`。
+
+```bash
+future task add --name "守护自愈 · watchd 保活" \
+  --prompt-file prompts/keepalive.md --cwd "<本仓绝对路径>" \
+  --every 5m --conversation workspace --session new --session-retention delete \
+  --model future/deepseek-flash --thinking off
+```
+
+- **它只是“谁启动 watchd/谁探活”，不管扫描**：30 秒一轮的扫描仍由 `bin/watchd.sh` 做，零 token。
+- **每次探活都是一次 agent 运行**，所以：模型用最便宜的、`--thinking off`、提示词短、健康时
+  最多一次工具调用；`--session-retention delete` 让这些运行不在侧边栏堆会话（运行登记还在，
+  `future task runs` 查得到）。想让成本可接受就把间隔放长（`--every 15m` / `30m`）——
+  代价是**守护死后到被拉起的最大时延**等于这个间隔。
+- **前提是桌面端（或 headless desktop）在跑**：定时任务的“触发”由它执行，CLI 只负责写任务库。
+  桌面端关着的时候没有任何东西保活（`bin/watchd.sh` 自己仍在跑，但它死了就没人管），
+  这是它比系统调度器弱的地方，取舍讲清楚再选。
+- 提示词的源头留在这个仓里：改了 `prompts/keepalive.md` **必须**
+  `future task edit <id> --prompt-file prompts/keepalive.md` 同步，否则任务跑的是库里的旧副本。
 
 ## 在这个设施里查存活
 
