@@ -36,7 +36,7 @@ FUTURE = future_exe()
 def run(args, timeout=120):
     env = dict(os.environ)
     env["PATH"] = tool_path()
-    p = subprocess.run([FUTURE] + args, capture_output=True, text=True, timeout=timeout, env=env)
+    p = subprocess.run([FUTURE] + args, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout, env=env)
     return p.stdout
 
 

@@ -48,8 +48,12 @@ import goal_sessions  # noqa: E402
 
 # Locating `future`/`python3`: discovery, not a hardcoded Homebrew path (see toolpath.py).
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from toolpath import future_exe, tool_path, config_path  # noqa: E402
+from toolpath import future_exe, tool_path, config_path, bash_exe  # noqa: E402
 FUTURE = future_exe()
+# The relay is a bash one-liner (`$(cat ...)`, `timeout`), so it needs a real bash.
+# On Windows that is Git Bash, which is not on PATH by default — resolve it like
+# the other tools instead of assuming the spelling works everywhere.
+BASH = bash_exe() or "bash"
 LOGDIR = os.path.join(WATCH, "logs")
 # A relayed message starts with this heading (see `frame()`); the legacy form
 # `[会话总管 <id> 转达] …` is still recognised so old sends keep being counted.
@@ -113,7 +117,7 @@ SKIP_GOAL_SESSIONS = _cfg_bool("relay_skip_goal_sessions", True)
 def run(args, timeout=60):
     env = dict(os.environ)
     env["PATH"] = tool_path()
-    p = subprocess.run([FUTURE] + args, capture_output=True, text=True, timeout=timeout, env=env)
+    p = subprocess.run([FUTURE] + args, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout, env=env)
     return p.returncode, p.stdout, p.stderr
 
 
@@ -203,7 +207,7 @@ def run_py(args, timeout=120):
     """
     env = dict(os.environ)
     env["PATH"] = tool_path()
-    p = subprocess.run([sys.executable] + args, capture_output=True, text=True,
+    p = subprocess.run([sys.executable] + args, capture_output=True, text=True, encoding="utf-8", errors="replace",
                        timeout=timeout, env=env)
     return p.returncode, p.stdout, p.stderr
 
@@ -556,9 +560,9 @@ def main(argv):
               f"\"$(cat {json.dumps(framed_file)})\" "
               f">> {json.dumps(log)} 2>&1; echo \"exit:$?\" >> {json.dumps(log)}")
     if wait:
-        subprocess.run(["bash", "-c", script], timeout=timeout + 60)
+        subprocess.run([BASH, "-c", script], timeout=timeout + 60)
     else:
-        subprocess.Popen(["bash", "-c", script], stdout=subprocess.DEVNULL,
+        subprocess.Popen([BASH, "-c", script], stdout=subprocess.DEVNULL,
                          stderr=subprocess.DEVNULL, start_new_session=True)
     run_py([os.path.join(WATCH, "bin", "guard.py"), "record", sid, note or "send.py"])
     resolve_deferral(sid, text_file)

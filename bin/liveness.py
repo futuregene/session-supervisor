@@ -38,6 +38,8 @@ import time
 
 DEFAULT_MAX_AGE = 180
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from toolpath import bash_exe  # noqa: E402
 
 
 def paths(root):
@@ -134,11 +136,11 @@ def scanner(root, max_age):
 def start_watchd(root):
     _, _, logdir = paths(root)
     os.makedirs(logdir, exist_ok=True)
-    bash = shutil.which("bash") or ("/bin/bash" if os.path.exists("/bin/bash") else None)
+    bash = bash_exe()
     if not bash:
         raise RuntimeError(
-            "no bash on PATH: bin/watchd.sh needs one (on Windows install Git Bash or "
-            "run the facility under WSL)")
+            "no bash found (PATH, $BASH, or the Git Bash prefixes): bin/watchd.sh needs one "
+            "(on Windows install Git Bash, on WSL use the Linux side)")
     out = open(os.path.join(logdir, "watchd-ensure.out"), "a", encoding="utf-8")
     subprocess.Popen(
         [bash, os.path.join(root, "bin", "watchd.sh")],

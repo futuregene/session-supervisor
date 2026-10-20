@@ -20,10 +20,12 @@ import subprocess
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from toolpath import bash_exe  # noqa: E402
 
 
 def run(cmd: list[str], cwd: str = ROOT) -> subprocess.CompletedProcess:
-    return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
+    return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, encoding="utf-8", errors="replace")
 
 
 def check(name: str, fn) -> bool:
@@ -54,13 +56,22 @@ def check_python_syntax() -> tuple[bool, str]:
 
 def check_shell_syntax() -> tuple[bool, str]:
     bin_dir = os.path.join(ROOT, "bin")
+    bash = bash_exe()
+    if not bash:
+        return False, ("no bash found (PATH, $BASH, or the Git Bash prefixes); "
+                       "bin/watchd.sh cannot be checked or run")
     bad = []
     for fn in sorted(os.listdir(bin_dir)):
         if not fn.endswith(".sh"):
             continue
-        p = run(["bash", "-n", os.path.join(bin_dir, fn)])
+        p = run([bash, "-n", os.path.join(bin_dir, fn)])
         if p.returncode != 0:
             bad.append(fn)
+        elif b"\r\n" in open(os.path.join(bin_dir, fn), "rb").read():
+            # A CRLF `#!/bin/bash` makes Git Bash answer `$'\r': command not found`
+            # for every line. core.autocrlf=true on Windows would otherwise hand
+            # this checkout CRLF scripts and the daemon would never start.
+            bad.append(f"{fn} (CRLF line endings)")
     return (not bad), (", ".join(bad) if bad else "all bin/*.sh parse")
 
 

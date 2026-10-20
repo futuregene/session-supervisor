@@ -440,7 +440,10 @@ check("named after the feature", created[0][1][created[0][1].index("--name") + 1
 launched = rec.launched[0][1][0][2]  # ("popen", (["bash", "-c", script],)) → script
 check("and the work order went to the NEW session", "NEW-SID" in launched, True)
 check("never to the reused one", "--session sid " in launched, False)
-check("--cwd of the run is the repo, not the caller", tempfile.gettempdir() in launched, True)
+# The path is embedded with json.dumps (so bash sees one argument), which doubles
+# backslashes on Windows: compare against the escaped form, not the raw path.
+check("--cwd of the run is the repo, not the caller",
+      json.dumps(tempfile.gettempdir())[1:-1] in launched, True)
 check("the topic survived", "--note" not in launched and "新功能" in open(
     os.path.join(send.WATCH, "state", "relay-out.txt"), encoding="utf-8").read(), True)
 

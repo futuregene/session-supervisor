@@ -43,7 +43,7 @@ import inbox as inbox_mod  # noqa: E402
 
 # Locating `future`/`python3`: discovery, not a hardcoded Homebrew path (see toolpath.py).
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from toolpath import future_exe, tool_path, config_path  # noqa: E402
+from toolpath import future_exe, tool_path, config_path, bash_exe  # noqa: E402
 CFG_PATH = config_path()
 
 
@@ -82,7 +82,7 @@ def future(cfg, args, timeout=30):
     env = dict(os.environ)
     env["PATH"] = tool_path()
     try:
-        p = subprocess.run([exe] + args, capture_output=True, text=True, timeout=timeout, env=env)
+        p = subprocess.run([exe] + args, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout, env=env)
         return p.returncode, p.stdout, p.stderr
     except Exception as exc:  # noqa: BLE001
         return 127, "", str(exc)
@@ -217,7 +217,7 @@ def main():
             suppressed.append(e["id"])
             continue
         try:
-            rc = subprocess.run([py, guard, "check", sid], capture_output=True, text=True, timeout=20).returncode
+            rc = subprocess.run([py, guard, "check", sid], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=20).returncode
         except Exception:
             rc = 0
         if rc == 1:
@@ -226,7 +226,7 @@ def main():
     if suppressed:
         interesting = [e for e in interesting if e.get("sessionId") not in blocked]
         subprocess.run([py, os.path.join(WATCH, "bin", "inbox.py"), "ack"] + suppressed,
-                       capture_output=True, text=True, timeout=30)
+                       capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30)
         log(f"guard-suppressed {len(suppressed)} event(s) in {len(blocked)} session(s); acked")
     wakes = read_jsonl(WAKES)
     last_ts = max([float(w.get("ts") or 0) for w in wakes], default=0.0)
@@ -339,7 +339,7 @@ def main():
     with open(WAKES, "a", encoding="utf-8") as fh:
         fh.write(json.dumps({"ts": now, "reason": reason, "pending": len(pending),
                              "highMedium": len(interesting)}) + "\n")
-    subprocess.Popen([os.path.join(WATCH, "bin", "wake.sh"), reason],
+    subprocess.Popen([BASH, os.path.join(WATCH, "bin", "wake.sh"), reason],
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
     log(f"woke supervisor: reason={reason} pending={len(pending)} highMedium={len(interesting)}")
     return 0

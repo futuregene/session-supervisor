@@ -1,0 +1,9 @@
+# Line endings: the shell scripts must be LF even on Windows.
+#
+# Git for Windows ships `core.autocrlf=true`, so a plain checkout hands out the
+# `bin/*.sh` scripts with CRLF. A CRLF shebang makes Git Bash answer
+# `$'\r': command not found` for every line of `watchd.sh`, so the watcher never
+# starts and the only symptom is a stale `state/health.json`
+# (INSTALL.md §6, runbook `supervisor-daemon.md` Windows section).
+# `bin/selfcheck.py` fails a CRLF script too, so this cannot regress silently.
+*.sh text eol=lf

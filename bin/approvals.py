@@ -36,7 +36,7 @@ def future(args, timeout=45):
     env = dict(os.environ)
     env["PATH"] = tool_path()
     try:
-        p = subprocess.run([exe] + args, capture_output=True, text=True, timeout=timeout, env=env)
+        p = subprocess.run([exe] + args, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout, env=env)
         return p.returncode, p.stdout, p.stderr
     except Exception as exc:  # noqa: BLE001
         return 127, "", str(exc)

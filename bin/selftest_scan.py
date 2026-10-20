@@ -203,7 +203,40 @@ def main():
         bad += 1
         print("  MISMATCH stable key still carries a stamp")
 
-    print(f"cases={len(CASES) + len(PEAK_CASES) + len(KEY_CASES)} mismatches={bad}")
+    # The exclusion that keeps the supervisor from waking itself. The same checkout
+    # comes back as `D:\repo` from `session list` and `D:/repo` from `session new`
+    # (measured 2026-10-20 on the first Windows install), so a raw `startswith`
+    # missed the supervisor's own session — the one loop the exclusion exists to
+    # prevent. The comparison folds separators, and case where the platform does.
+    print("cwd_excluded: one spelling of a path, whichever tool produced it")
+    SEP = os.sep
+    CWD_CASES = [
+        ("the prefix is the cwd itself", f"D:{SEP}repo", [f"D:{SEP}repo"], True),
+        ("a child of the prefix", f"D:{SEP}repo{SEP}sub", [f"D:{SEP}repo"], True),
+        ("the prefix carries a trailing separator",
+         f"D:{SEP}repo{SEP}sub", [f"D:{SEP}repo{SEP}"], True),
+        ("the cwd carries a trailing separator", f"D:{SEP}repo{SEP}", [f"D:{SEP}repo"], True),
+        ("the cwd carries a doubled separator",
+         f"D:{SEP}repo{SEP}{SEP}sub", [f"D:{SEP}repo"], True),
+        ("a sibling with a shared stem is not excluded", f"D:{SEP}repo2", [f"D:{SEP}repo"], False),
+        ("outside the prefix", f"D:{SEP}other{SEP}sub", [f"D:{SEP}repo"], False),
+        ("a missing cwd excludes nothing", None, [f"D:{SEP}repo"], False),
+        ("an empty prefix list excludes nothing", f"D:{SEP}repo", [], False),
+    ]
+    if os.name == "nt":
+        # Only Windows hands back both separator spellings for one directory, and
+        # only Windows folds case — so only Windows can prove these two.
+        CWD_CASES += [
+            ("the other separator", "D:/repo/sub", ["D:\\repo"], True),
+            ("case differs", "d:/REPO/sub", ["D:\\repo"], True),
+        ]
+    for name, cwd, prefixes, want in CWD_CASES:
+        got = m.cwd_excluded(cwd, prefixes)
+        if got != want:
+            bad += 1
+        print(f"  {'ok      ' if got == want else 'MISMATCH'} excluded={got} want={want} :: {name}")
+
+    print(f"cases={len(CASES) + len(PEAK_CASES) + len(KEY_CASES) + len(CWD_CASES)} mismatches={bad}")
     return 1 if bad else 0
 
 

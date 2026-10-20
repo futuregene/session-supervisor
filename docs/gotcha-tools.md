@@ -110,3 +110,24 @@
   3. 以上都排除后，才谈"夹具没触发"。
 - **为什么贵**：把"没编译"当成"覆盖不到"会多写豁免；当成"已覆盖"则给一个**根本没跑过**的夹具挂上"已验证"。
 
+### D27 Windows 上这套设施的五个静默坑（第一次在 Windows 装时逐条踩到）
+- **CRLF shebang**：`core.autocrlf=true` 下 checkout 出来的 `bin/*.sh` 是 CRLF，Git Bash 对每一行都回
+  `$'\r': command not found`，`watchd.sh` 起不来，唯一症状是 `state/health.json` 一直旧。
+  药方是仓里的 `.gitattributes`（`*.sh text eol=lf`）+ `check_shell_syntax` 对 CRLF 直接判红。
+  **老 checkout 要 renormalize**（`git rm --cached -r . && git reset --hard`），否则属性文件改不动盘上已有的字节。
+- **`subprocess(..., text=True)` 用 locale 解码**：Windows 简体中文机器上是 gbk，而 `future` 输出 UTF-8，
+  于是**只要哪个会话标题带中文，解析就抛 `UnicodeDecodeError`**（`session list` 一挂，扫描器就瞎）。
+  药方：所有 `text=True` 一律带上 `encoding="utf-8", errors="replace"`。
+- **bash 不在 PATH 上**：`bin/watchd.sh`、`wake.sh`、`send.py` 的中继、`liveness --ensure` 都要真 bash。
+  Git Bash 在 `C:\Program Files\Git\bin`，默认不进 PATH；**而且已启动的进程看不到之后改的 PATH**（改完不重启不生效）。
+  药方：`toolpath.bash_exe()`（`$BASH` → PATH → Git Bash 前缀 → `/bin/bash`），脚本里别再写 `"bash"`。
+- **`watchd.sh` / `wake.sh` 的"干净 PATH"在 Windows 上把解释器也清掉了**：那串
+  `/opt/homebrew/bin /usr/local/bin …` 在 Windows 上一个都不存在，`command -v python3` 落空后回退到
+  `/usr/bin/python3`（也不存在）——守夜进程起得来，但什么都不跑。药方：`uname` 判 MINGW/MSYS/CYGWIN 时
+  **追加继承来的 PATH**（Git Bash 里它已经是转换过的 Windows PATH；只按冒号切，Windows 路径带空格）。
+- **同一个目录有两种写法**：`session new` 回 `D:/repo`，`session list` 回 `D:\repo`。
+  `exclude_cwd_prefix` 原来是裸 `startswith`，于是**总管会扫到自己的会话**（自我唤醒的死循环）。
+  药方：`scan.cmp_path()`（两侧都过 `normcase`+`normpath`），比较还要求分隔符边界，
+  免得 `D:\repo` 顺手把 `D:\repo2` 也排掉。
+- **推论**：`.sh` 不能直接当 `argv[0]` 起（Windows 上不是可执行文件），`wake.sh` 必须由 bash 拉起来。
+

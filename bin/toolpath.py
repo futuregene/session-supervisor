@@ -73,6 +73,37 @@ def python_exe() -> str:
     return sys.executable or "python3"
 
 
+def bash_exe() -> str | None:
+    """Absolute path to a bash that can run `bin/*.sh`, or None.
+
+    `bin/watchd.sh` needs a real bash (`command -v`, `kill -0`, `mkdir -p`,
+    `date`), and on Windows that is Git Bash, which is **not on PATH** by
+    default — `C:\\Program Files\\Git\\bin` is a machine or user PATH entry the
+    installer may or may not have added, and a process started before that edit
+    never sees it. Resolving it the same way as `future`/`python3` means a
+    watcher started by the app inherits a working bash without a reboot.
+
+    `$BASH` wins (a shell that already knows where bash is can say so), then
+    PATH, then the Windows install prefixes, then `/bin/bash`.
+    """
+    explicit = (os.environ.get("BASH") or "").strip()
+    if explicit and os.path.exists(explicit):
+        return explicit
+    found = shutil.which("bash")
+    if found:
+        return found
+    for p in (
+        r"C:\Program Files\Git\bin\bash.exe",
+        r"C:\Program Files (x86)\Git\bin\bash.exe",
+        os.path.expanduser(r"~\AppData\Local\Programs\Git\bin\bash.exe"),
+        "/bin/bash",
+        "/usr/bin/bash",
+    ):
+        if os.path.exists(p):
+            return p
+    return None
+
+
 def tool_path(base: str | None = None) -> str:
     """A PATH value with the toolchain's own directories in front.
 
@@ -105,4 +136,5 @@ def config_path() -> str:
 if __name__ == "__main__":  # cheap way to see what this host resolves to
     print(f"future  : {future_exe(os.environ.get('FUTURE_BIN') or None)}")
     print(f"python  : {python_exe()}")
+    print(f"bash    : {bash_exe()}")
     print(f"toolpath: {tool_path()}")

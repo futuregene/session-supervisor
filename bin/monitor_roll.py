@@ -194,7 +194,7 @@ def future(args, timeout=60):
     env = dict(os.environ)
     env["PATH"] = tool_path()
     try:
-        p = subprocess.run([FUTURE] + args, capture_output=True, text=True,
+        p = subprocess.run([FUTURE] + args, capture_output=True, text=True, encoding="utf-8", errors="replace",
                            timeout=timeout, env=env)
         return p.returncode, p.stdout, p.stderr
     except Exception as exc:  # noqa: BLE001
@@ -277,7 +277,7 @@ def apply_manual(session_id):
         return
     try:
         p = subprocess.run([sys.executable, script, "--apply", "--session", session_id],
-                           capture_output=True, text=True, timeout=600)
+                           capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=600)
     except Exception as exc:  # noqa: BLE001
         log(f"append apply after roll could not run: {exc}")
         return

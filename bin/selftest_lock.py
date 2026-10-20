@@ -47,7 +47,7 @@ def acquire_in_its_own_process(tmp, note):
         "sys.exit(lock.main(['acquire', '--note', {note!r}]))"
     ).format(here=HERE, tmp=tmp, lk=os.path.join(tmp, "agent.lock"),
              cfg=os.path.join(tmp, "config.json"), note=note)
-    return subprocess.run([sys.executable, "-c", code], capture_output=True, text=True).returncode
+    return subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, encoding="utf-8", errors="replace").returncode
 
 
 def main():

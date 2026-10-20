@@ -92,7 +92,7 @@ def should_apply(current_mode, reason, force=False, cooldown=DEFAULT_COOLDOWN):
 def run_apply(timeout=240):
     try:
         p = subprocess.run([sys.executable, os.path.join(WATCH, "bin", "apply_prompt.py"), "--apply"],
-                           capture_output=True, text=True, timeout=timeout)
+                           capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout)
         return p.returncode == 0, ((p.stdout or "") + (p.stderr or "")).strip()[-300:]
     except Exception as exc:  # noqa: BLE001
         return False, f"apply errored: {exc}"

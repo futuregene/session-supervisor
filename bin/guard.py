@@ -77,13 +77,13 @@ def observed_sends(sid, future_bin=None):
         hits = {}
         try:
             p = subprocess.run([exe, "session", "list", "--json"], capture_output=True,
-                               text=True, timeout=45, env=env)
+                               text=True, encoding="utf-8", errors="replace", timeout=45, env=env)
             for s in json.loads(p.stdout).get("sessions", []):
                 if now * 1000 - int(s.get("updatedAtMs") or 0) > 36 * 3600 * 1000:
                     continue
                 p2 = subprocess.run([exe, "session", "transcript", "--session", s["id"],
                                      "--select", "user", "--limit", "3", "--json"],
-                                    capture_output=True, text=True, timeout=45, env=env)
+                                    capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=45, env=env)
                 if p2.returncode != 0:
                     continue
                 for e in json.loads(p2.stdout).get("entries", []):

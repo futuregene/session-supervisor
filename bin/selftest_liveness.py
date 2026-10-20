@@ -42,7 +42,7 @@ def fixture(root, pid=None, health=None):
 def run(root, *extra):
     return subprocess.run([sys.executable, os.path.join(HERE, "liveness.py"),
                            "--root", root, *extra],
-                          capture_output=True, text=True).returncode
+                          capture_output=True, text=True, encoding="utf-8", errors="replace").returncode
 
 
 def main():
@@ -75,7 +75,7 @@ def main():
 
         # --json is machine-readable and carries both halves.
         p = subprocess.run([sys.executable, os.path.join(HERE, "liveness.py"),
-                            "--root", tmp, "--json"], capture_output=True, text=True)
+                            "--root", tmp, "--json"], capture_output=True, text=True, encoding="utf-8", errors="replace")
         payload = json.loads(p.stdout)
         check("json has both halves", sorted(payload)[:3],
               ["healed", "ok", "scanner"])

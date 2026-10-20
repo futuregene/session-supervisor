@@ -15,11 +15,28 @@ WATCH="$(cd "$(dirname "$0")/.." && pwd)"
 # actually exist on this host (2026-10-18: discovery, not a hardcoded prefix — the
 # old line replaced PATH with one machine's Homebrew path; inheriting the caller's
 # PATH would instead let a dev working-tree build shadow the installed CLI).
+INHERITED_PATH="$PATH"
 PATH=""
+_add_path() {
+  [ -n "$1" ] && [ -d "$1" ] || return 0
+  case ":$PATH:" in *":$1:"*) return 0 ;; esac
+  PATH="${PATH:+$PATH:}$1"
+}
 for d in "${FUTURE_TOOLBIN:-}" /opt/homebrew/bin /usr/local/bin "$HOME/.local/bin" \
          /usr/bin /bin /usr/sbin /sbin; do
-  [ -n "$d" ] && [ -d "$d" ] && case ":$PATH:" in *":$d:"*) ;; *) PATH="${PATH:+$PATH:}$d" ;; esac
+  _add_path "$d"
 done
+# Git Bash / Cygwin on Windows: the inherited PATH is the Windows PATH already in
+# POSIX form, and that is where the interpreter and the CLI actually live
+# (`…\Programs\Python313`, `~/.future/bin`). None of the POSIX prefixes above exist
+# there, so without this a wake finds neither `python3` nor `future` and falls
+# through to the bare-name fallbacks. Split on colons only: Windows paths carry spaces.
+case "$(uname -s 2>/dev/null || true)" in
+  MINGW*|MSYS*|CYGWIN*)
+    _oldifs="$IFS"; IFS=':'
+    for d in $INHERITED_PATH; do _add_path "$d"; done
+    IFS="$_oldifs" ;;
+esac
 export PATH
 FUTURE="$(command -v future || true)"
 [ -n "$FUTURE" ] || FUTURE="future"

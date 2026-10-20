@@ -65,7 +65,7 @@ def metrics(session_id):
     env["PATH"] = tool_path()
     try:
         p = subprocess.run([FUTURE, "session", "status", session_id, "--json", "--metrics"],
-                           capture_output=True, text=True, timeout=45, env=env)
+                           capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=45, env=env)
         return json.loads(p.stdout) if p.returncode == 0 else None
     except Exception:  # noqa: BLE001
         return None

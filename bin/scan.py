@@ -49,6 +49,30 @@ def _expand_watch(path):
     return str(path).replace("${WATCH}", WATCH).replace("$WATCH", WATCH)
 
 
+def cmp_path(path):
+    """One comparable spelling of a directory, for prefix checks.
+
+    The same checkout comes back as `D:\\repo` from `session list` and `D:/repo`
+    from `session new` (and one command expands `~` where another does not), so a
+    raw `startswith` against a config prefix misses exactly the sessions the
+    prefix was meant to exclude — on this host it missed the supervisor's own
+    session, which is the one loop the exclusion exists to prevent.
+    """
+    return os.path.normcase(os.path.normpath(str(path or ""))) if path else ""
+
+
+def cwd_excluded(cwd, prefixes):
+    """True when `cwd` is at or under one of the excluded prefixes."""
+    if not cwd:
+        return False
+    here = cmp_path(cwd)
+    for p in prefixes:
+        pre = cmp_path(p)
+        if pre and (here == pre or here.startswith(pre + os.sep)):
+            return True
+    return False
+
+
 def load_json(path, default):
     try:
         with open(path, "r", encoding="utf-8") as fh:
@@ -85,7 +109,7 @@ def future(cfg, args, timeout=120):
     env = dict(os.environ)
     env["PATH"] = tool_path()
     try:
-        p = subprocess.run([exe] + args, capture_output=True, text=True, timeout=timeout, env=env)
+        p = subprocess.run([exe] + args, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout, env=env)
         return p.returncode, p.stdout, p.stderr
     except subprocess.TimeoutExpired:
         return 124, "", "timeout"
@@ -369,7 +393,7 @@ def main():
         sid = s.get("id")
         if not sid or sid in exclude:
             continue
-        if any(str(s.get("cwd") or "").startswith(p) for p in exclude_cwd):
+        if cwd_excluded(s.get("cwd"), exclude_cwd):
             continue
         if skip_goal and skip_goal_session(
                 sid, s.get("sessionName") or s.get("firstMessage") or "",
