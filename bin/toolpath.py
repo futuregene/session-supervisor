@@ -45,6 +45,35 @@ def _bin_dirs() -> list[str]:
     return [d for d in dirs if d and os.path.isdir(d)]
 
 
+def utf8_stdout() -> None:
+    """Make this process print UTF-8 whatever the host's locale says.
+
+    Windows: when stdout is a pipe, Python encodes with the ANSI code page (cp936
+    here, measured 2026-10-20), not UTF-8. Everything downstream assumes UTF-8:
+    `bin/wake.sh` captures the text with `$(...)` and hands it to the CLI as an
+    argument, where Git Bash's msys runtime decodes those bytes as UTF-8 — so a
+    GBK-encoded card arrives as mojibake (the user saw
+    `# 一次唤醒回合` become `# һ´λ½ÐѻغÏ`, 2026-10-20), and any script that prints
+    Chinese and is captured by a tool crashes outright with UnicodeEncodeError.
+
+    Setting PYTHONIOENCODING in one launcher is not enough: the scripts also run
+    from a shell, a scheduled task and a self-test, each with a different
+    environment. Reconfiguring at the top of `main` makes the guarantee local to
+    the process that prints.
+
+    stdout is strict (UTF-8 encodes every code point, so a failure is a real
+    bug), stderr escapes instead of failing — a diagnostic must never be the
+    thing that turns into a traceback.
+    """
+    for stream, errors in ((sys.stdout, "strict"), (sys.stderr, "backslashreplace")):
+        try:
+            # newline="\n": the text is an argument, not a file; a CR from the
+            # Windows text layer has no business inside the card.
+            stream.reconfigure(encoding="utf-8", errors=errors, newline="\n")  # type: ignore[union-attr]
+        except (AttributeError, ValueError, OSError):
+            pass  # replaced stream (StringIO in tests), closed pipe: nothing to do
+
+
 def future_exe(preferred: str | None = None) -> str:
     """Absolute path to the `future` CLI, or the bare name if nothing is found.
 

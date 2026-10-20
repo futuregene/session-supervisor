@@ -38,6 +38,14 @@ case "$(uname -s 2>/dev/null || true)" in
     IFS="$_oldifs" ;;
 esac
 export PATH
+# Python writes UTF-8 to pipes regardless of the host code page. Without this the
+# card composed below is emitted as cp936 bytes on Windows, Git Bash hands those
+# bytes to the CLI as if they were UTF-8, and every Chinese character in the card
+# reaches the model as mojibake (2026-10-20). The scripts also reconfigure their
+# own stdout (bin/toolpath.py: utf8_stdout) — two layers, because this file is not
+# the only entry point.
+export PYTHONIOENCODING=utf-8
+export PYTHONUTF8=1
 FUTURE="$(command -v future || true)"
 [ -n "$FUTURE" ] || FUTURE="future"
 PY="$(command -v python3 || true)"

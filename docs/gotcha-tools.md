@@ -135,3 +135,21 @@
   药方：`watchd.sh` 写 `/proc/$$/winpid`（没有就退回 `$$`），重复启动的判断也用 `ps -W` 的第 4 列
   （WINPID）而不是 `kill -0`；升级时用 `_any_alive` 同时按两套编号查，免得旧 pid 文件让新进程误判后起第二份。
 
+### D28 管道里的 stdout 是**本机代码页**，不是 UTF-8（唤醒卡因此整卡乱码）
+- **症状**：手机端唤醒卡是一整片乱码（`# 一次唤醒回合` 变成 `# һ´λ½ÐѻغÏ`），而回复本身正常。
+  模型那边收到的也是乱码——坏在**生成与传递之间**，不在模型。
+- **成因**：Windows 上 Python 的 stdout 若不是终端而是管道，编码取**本机 ANSI 代码页**（简体中文即 cp936），
+  与 `sys.getfilesystemencoding()` 无关、与 `PYTHONUTF8` 无关（只是没设）。实测
+  `b'# \xd2\xbb\xb4\xce...'` —— 这就是 "一次唤醒" 的 GBK 字节。
+  `wake.sh` 用 `"$("$PY" .../turn_prompt.py")"` 把这些字节捕获成参数，Git Bash 的 msys 运行时按 **UTF-8**
+  转 UTF-16 交给 `future.exe`，非法字节被就地毁掉，于是整段中文成了乱码。
+- **药方（两层，缺一不可）**：
+  1. 打印中文的脚本自己在 `main()` 开头调 `toolpath.utf8_stdout()`（`stdout.reconfigure(encoding="utf-8",
+     newline="\n")`，stderr 用 `backslashreplace` 免得诊断自己崩）；
+  2. `wake.sh` 里 `export PYTHONIOENCODING=utf-8` + `PYTHONUTF8=1`，覆盖这条链路上被它拉起的其它脚本。
+  只做第 2 层不够：脚本还会被 shell、定时任务、自测各自以不同环境启动，"谁打印谁负责"才闭合。
+- **别只看字面**：`print()` 成功不代表对。判据是**字节**——`python3 bin/turn_prompt.py | xxd` 或
+  子进程 `capture_output=True` 后 `.decode("utf-8")`。`bin/selftest_prompt.py` 现在按这条判据锁住它
+  （剥掉 `PYTHONIOENCODING` 起子进程，断言字节可 UTF-8 解码且等于 `compose()`）。
+- **同一根源的另一个表现**：`bin/peek.py` 在没设 `PYTHONIOENCODING` 时，打印中文标签直接
+  `UnicodeEncodeError` 崩掉（cp936 编不出 `\ufffd`），看到的是"脚本坏了"而不是"编码错了"。

@@ -14,6 +14,7 @@ import importlib.util
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 
@@ -215,6 +216,29 @@ with tempfile.TemporaryDirectory() as d:
     check("the lost body is called out", any("正文已丢失" in g for g in got), True)
     check("and it says the message was never delivered",
           any("从未送达" in g for g in got), True)
+
+print("stdout is UTF-8, not the host code page")
+# Regression (2026-10-20): with stdout on a pipe and no encoding override, Python on
+# Windows encodes with the ANSI code page (cp936 here). `wake.sh` captured those
+# bytes with `$(...)`, Git Bash handed them to the CLI as if they were UTF-8, and the
+# user saw the whole card as `# һ´λ½ÐѻغÏ` instead of `# 一次唤醒回合`.
+# The contract is byte-level, so assert it on a *separate* process whose environment
+# carries no encoding override: the composition itself was never wrong, the transport
+# was.
+_env = {k: v for k, v in os.environ.items()
+        if k not in ("PYTHONIOENCODING", "PYTHONUTF8")}
+_proc = subprocess.run([sys.executable, os.path.join(ROOT, "bin", "turn_prompt.py")],
+                       capture_output=True, env=_env)
+try:
+    _decoded = _proc.stdout.decode("utf-8")
+    _utf8_ok = True
+except UnicodeDecodeError:
+    _decoded, _utf8_ok = "", False
+check("composed bytes are valid UTF-8", _utf8_ok, True)
+check("they decode to the composition, byte for byte",
+      _decoded.strip(), turn_prompt.compose(ROOT).strip() if _utf8_ok else "")
+check("and the Chinese survives the pipe", "唤醒" in _decoded, True)
+check("no cp936 mojibake reached the bytes", "һ" in _decoded, False)
 
 print()
 if FAILED:

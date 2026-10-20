@@ -31,6 +31,9 @@ import os
 import sys
 import datetime
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from toolpath import utf8_stdout  # noqa: E402
+
 WATCH = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 APPEND = os.path.join(WATCH, "prompts", "append.md")
 CARD = os.path.join(WATCH, "prompts", "turn.md")
@@ -244,6 +247,10 @@ def compose(watch=WATCH):
 
 
 def main(argv):
+    # stdout must be UTF-8 bytes: `wake.sh` captures them with `$(...)` and passes
+    # them as an argument, where Git Bash decodes them as UTF-8. Without this the
+    # whole card is delivered as mojibake on Windows (2026-10-20).
+    utf8_stdout()
     kind, why = mode()
     if "--mode" in argv:
         print(kind)

@@ -28,7 +28,7 @@ import sys
 
 # Locating `future`/`python3`: discovery, not a hardcoded Homebrew path (see toolpath.py).
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from toolpath import future_exe, tool_path  # noqa: E402
+from toolpath import future_exe, tool_path, utf8_stdout  # noqa: E402
 
 FUTURE = future_exe()
 
@@ -48,6 +48,10 @@ def total_entries(sid):
 
 
 def main(argv):
+    # Chinese labels below are printed to whatever pipe captured us; on Windows the
+    # default encoding is cp936 and the escape text became a UnicodeEncodeError
+    # instead of output (2026-10-20). UTF-8 unconditionally.
+    utf8_stdout()
     if not argv or argv[0] in ("-h", "--help"):
         print(__doc__)
         return 0 if argv else 2
