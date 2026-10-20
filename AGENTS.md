@@ -110,9 +110,6 @@
 - **新功能就开新会话**（`send.py --new --cwd <仓> --name "<功能>"`）：复用会话会把旧历史带进新工作，
   对方每轮为它付费且容易误读。刚建的会话不在 session list 里，脚本用 `session status` 取 cwd。
 - **一键停**：`touch state/PAUSE`（存在即不唤醒、不自动批准）。
-- **每 3 小时有一条代管通道**：被代管仓库的 `dev-<user>` 长期分支由定时任务「dev 分支定期提 PR」
-  （`prompts/dev-pr.md` → `bin/dev_pr.py`）送进 `main`；判据与边界见 [docs/dev-branch-pr.md](docs/dev-branch-pr.md)。
-  **那个仓库里「没看到 PR」不等于「活没干完」**——它的 `AGENTS.md` 写了本设施缺席时的回落路线。
 - **改运行参数只改 `bin/config.json`**（它就在读它的脚本旁边），改完 commit。
 
 ## 7. 目录

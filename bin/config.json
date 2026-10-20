@@ -11,8 +11,6 @@
   "liveness_minutes": 180,
   "skip_idle_heartbeat": true,
   "low_wake_minutes": 20,
-  "dev_pr_enabled": true,
-  "dev_pr_hours": 3,
   "monitor_roll_context_percent": 30,
   "monitor_session_name": "会话总管",
   "monitor_roll_max_queries": 60,
