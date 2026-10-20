@@ -149,6 +149,35 @@ def check_taskruns_selftest() -> tuple[bool, str]:
     return p.returncode == 0, (tail[-1] if tail else f"exit {p.returncode}")
 
 
+def check_balance_log_selftest() -> tuple[bool, str]:
+    """The accounting the daily briefing quotes, and the copy actually installed.
+
+    `bin/balance_log.py` is the source; the 08:30 briefing calls
+    `~/.future/bin/balance-log`. An untracked, untested script that a task depends
+    on fails silently — the only symptom is a missing section in the briefing — so
+    the source lives here with tests, and a local install that diverges from it is
+    a red check rather than a slow drift.
+
+    The drift half is skipped when no install exists (CI has none): it is a
+    deployment check, not a repository property.
+    """
+    p = run([sys.executable, os.path.join(ROOT, "bin", "selftest_balance_log.py")])
+    tail = (p.stdout or "").strip().splitlines()
+    if p.returncode != 0:
+        return False, (tail[-1] if tail else f"exit {p.returncode}")
+    import hashlib
+    import pathlib
+    src = pathlib.Path(ROOT) / "bin" / "balance_log.py"
+    dst = pathlib.Path(os.path.expanduser("~/.future/bin/balance-log"))
+    if not dst.exists():
+        return True, "logic ok; no local install to compare"
+    same = hashlib.sha256(src.read_bytes()).hexdigest() == hashlib.sha256(dst.read_bytes()).hexdigest()
+    if same:
+        return True, "logic ok; installed copy identical"
+    return False, ("installed copy differs from bin/balance_log.py — run "
+                   "`python3 bin/balance_log.py install` (the 08:30 briefing calls the installed one)")
+
+
 def check_ensure_append_selftest() -> tuple[bool, str]:
     """Editing the manual must not make every wake carry it twice.
 
@@ -624,6 +653,7 @@ CHECKS = [
     ("prompt split", check_prompt_split),
     ("notice/directives selftest", check_notice_selftest),
     ("taskruns selftest", check_taskruns_selftest),
+    ("balance-log selftest", check_balance_log_selftest),
     ("send selftest", check_send_selftest),
     ("roll selftest", check_roll_selftest),
     ("lock selftest", check_lock_selftest),

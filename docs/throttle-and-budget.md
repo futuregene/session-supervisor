@@ -78,3 +78,7 @@ system prompt 每个 run 重建、不进历史，只付缓存读。
 
 > 别用"token 数 × 单价"去反推总账来替代上面两个数：数值本身算得出，但分摊到哪一轮已经不可知，
 > 用它做趋势判断会被重置与删除同时干扰。
+- **记账脚本在版本库里**：`bin/balance_log.py`（源）+ `bin/selftest_balance_log.py`；
+  `~/.future/bin/balance-log` 只是装好的副本。改完源码跑一次
+  `python3 bin/balance_log.py install`，`selfcheck` 会比对两者 sha256，不一致即红——
+  一个每天被 08:30 简报调用、又不在版本库里的脚本，坏了唯一的表现是简报里少一节。
