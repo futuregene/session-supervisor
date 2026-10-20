@@ -76,15 +76,23 @@ journalctl --user -u session-watch -n 50
   任务停在 `Ready`、`NextRunTime` 空，**十几分钟没人发现**——因为本会报告"它死了"的那个进程
   正是它自己。药方是让**调度器**来判活：给登录触发器加
   `<Repetition><Interval>PT5M</Interval></Repetition>` + `MultipleInstancesPolicy=IgnoreNew`，
-  于是每 5 分钟调度器就试启动一次，活着的那次被 `IgnoreNew` 直接跳过（`watchd.sh` 自己的
-  pid 判重是第二道闸）。`watchd.log` 里会因此每 5 分钟多一行 `start`，那是正常的。
+  且**放在一个「一次性」时间触发器上**（登录触发器上的重复要等登录实例结束才开始计，
+  `NextRunTime` 会一直为空），于是每 5 分钟调度器就试启动一次，活着的那次被 `IgnoreNew`
+  直接跳过（`watchd.sh` 自己的 pid 判重是第二道闸）。`watchd.log` 里会因此每 5 分钟多一行 `start`，那是正常的。
   ```powershell
-  $t = Get-ScheduledTask -TaskName '<任务名>'
-  $t.Triggers[0].Repetition = (New-ScheduledTaskTrigger -Once -At (Get-Date) `
-        -RepetitionInterval (New-TimeSpan -Minutes 5)).Repetition
-  $t.Settings.MultipleInstances = 'IgnoreNew'
-  Set-ScheduledTask -TaskName '<任务名>' -Trigger $t.Triggers -Settings $t.Settings
+  # 一个「一次性 + 5 分钟重复」的时间触发器才是调度器真的会算的那个：
+  # 登录触发器上的重复间隔要等登录那次实例结束后才开始计，NextRunTime 一直为空（实测）。
+  $name = '<任务名>'
+  $task = Get-ScheduledTask -TaskName $name
+  $rep = New-ScheduledTaskTrigger -Once -At ((Get-Date).AddMinutes(1)) `
+          -RepetitionInterval (New-TimeSpan -Minutes 5)
+  $task.Settings.MultipleInstances = 'IgnoreNew'
+  Set-ScheduledTask -TaskName $name -Trigger @($task.Triggers[0], $rep) -Settings $task.Settings
   ```
+  两个坑：**不要给重复加 `Duration`**（`New-ScheduledTaskTrigger` 默认给 `P1D`，配合
+  `StopAtDurationEnd=true` 到点会把正在跑的守护**停掉**，正好与保活相反；XML 里只留
+  `<Interval>PT5M</Interval>` 才是「无限重复」）。改完用 `Get-ScheduledTaskInfo` 看
+  `NextRunTime` 是不是非空——为空就是没生效。
 - **`liveness.py --ensure` 拉起来的那个必须与调用者的控制台脱钩**：`start_new_session=True` 是
   POSIX 专用、在 Windows 上被静默忽略，于是子进程继承了调用者的控制台，控制台一关
   （agent 回合结束、终端窗口关闭）整棵进程树收到 `CTRL_CLOSE_EVENT` 就没了。
