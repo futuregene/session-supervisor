@@ -66,11 +66,30 @@ journalctl --user -u session-watch -n 50
 
 - **Git Bash**：装 Git for Windows 后 `bash.exe` 在 PATH 上。任务计划程序里
   动作 = `C:\Program Files\Git\bin\bash.exe`，参数 = `<本仓>\bin\watchd.sh`，
-  "触发器"选"登录时"，"设置"里勾"如果任务失败，按以下频率重新启动"（10 分钟）。
+  "触发器"选"登录时"，**并且给它加一个 5 分钟重复间隔**（见下），"设置"里再加
+  "如果任务失败，按以下频率重新启动"（10 分钟）。
 - **WSL**：在 WSL 里照上面 Linux 那套装 systemd 用户服务，仓库放在 WSL 的文件系统里
   （放在 `/mnt/c` 上会和 Windows 侧的进程抢同一批文件锁）。
-- 任务计划程序没有 launchd 的 `KeepAlive`，"重启频率"是最近似的东西；
-  `liveness.py --ensure` 是兜底（唤醒回合发现它死了会拉起来）。
+- **"重启频率"不够——必须有重复触发器**：`RestartOnFailure` 只在任务**以失败退出**时生效，
+  而守护进程最常见的死法是**没有报错的死**。实测：任务 `LastTaskResult`
+  = `3221225786`（`0xC000013A`，`STATUS_CONTROL_C_EXIT`，即启动它的那个控制台被关掉），
+  任务停在 `Ready`、`NextRunTime` 空，**十几分钟没人发现**——因为本会报告"它死了"的那个进程
+  正是它自己。药方是让**调度器**来判活：给登录触发器加
+  `<Repetition><Interval>PT5M</Interval></Repetition>` + `MultipleInstancesPolicy=IgnoreNew`，
+  于是每 5 分钟调度器就试启动一次，活着的那次被 `IgnoreNew` 直接跳过（`watchd.sh` 自己的
+  pid 判重是第二道闸）。`watchd.log` 里会因此每 5 分钟多一行 `start`，那是正常的。
+  ```powershell
+  $t = Get-ScheduledTask -TaskName '<任务名>'
+  $t.Triggers[0].Repetition = (New-ScheduledTaskTrigger -Once -At (Get-Date) `
+        -RepetitionInterval (New-TimeSpan -Minutes 5)).Repetition
+  $t.Settings.MultipleInstances = 'IgnoreNew'
+  Set-ScheduledTask -TaskName '<任务名>' -Trigger $t.Triggers -Settings $t.Settings
+  ```
+- **`liveness.py --ensure` 拉起来的那个必须与调用者的控制台脱钩**：`start_new_session=True` 是
+  POSIX 专用、在 Windows 上被静默忽略，于是子进程继承了调用者的控制台，控制台一关
+  （agent 回合结束、终端窗口关闭）整棵进程树收到 `CTRL_CLOSE_EVENT` 就没了。
+  代码里已用 `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP`（Windows）修掉，
+  见 [../gotcha-tools.md](../gotcha-tools.md) D29。
 
 **Windows 上必须先核对的三件事**（第一次装时逐条踩过，细节见
 [../gotcha-tools.md](../gotcha-tools.md) D27）：

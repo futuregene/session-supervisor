@@ -153,3 +153,26 @@
   （剥掉 `PYTHONIOENCODING` 起子进程，断言字节可 UTF-8 解码且等于 `compose()`）。
 - **同一根源的另一个表现**：`bin/peek.py` 在没设 `PYTHONIOENCODING` 时，打印中文标签直接
   `UnicodeEncodeError` 崩掉（cp936 编不出 `\ufffd`），看到的是"脚本坏了"而不是"编码错了"。
+
+### D29 Windows 上「守护进程静默死掉」：控制台一关，整棵树收到 CTRL_CLOSE_EVENT
+- **症状**：总管**完全不醒**，也不报错。用户问"你怎么没被唤醒"。`liveness.py` 说
+  `watchd pid N is not running`、`state/health.json` 老了几百秒，而 `logs/watchd.log` 最后一行只是
+  正常启动记录，没有 `stop`、没有异常。
+- **两条判据，分开看**：
+  1. 任务计划程序的 `LastTaskResult` = `3221225786`（`0xC000013A`）⇒ 这是 `STATUS_CONTROL_C_EXIT`，
+     即**控制台被关掉/Ctrl-C**，不是脚本逻辑错。正常退出是 `0`。
+  2. 进程是**从 agent 的 shell 里**被拉起来的（`liveness.py --ensure` 在场），而不是由调度器直接拉起
+     —— 那条链上它继承了那个控制台。
+- **成因**：`subprocess.Popen(..., start_new_session=True)` 在 Windows 上是**静默忽略**的
+  （POSIX 参数），所以 `--ensure` 拉起的 watchd 与调用者同一个控制台；那个控制台消失时，
+  Windows 给整棵树发 `CTRL_CLOSE_EVENT`，bash 直接死，**不执行任何 trap**。
+  同一台机器上同一天连起的三个实例都是这么没的。
+- **药方 1（代码，已修）**：Windows 上用 `creationflags=CREATE_NEW_PROCESS_GROUP|DETACHED_PROCESS`，
+  子进程根本没有控制台可丢；POSIX 仍用 `start_new_session=True`。
+- **药方 2（调度器，必须做）**：`RestartOnFailure` **兜不住这种死法**——任务被判为已结束，
+  停在 `Ready`、`NextRunTime` 为空，999 次重启一次都没触发。让**调度器判活**：登录触发器加
+  `PT5M` 重复间隔 + `MultipleInstancesPolicy=IgnoreNew`（活着的那次被直接跳过）。
+  这是唯一一个**不依赖本进程自己**的兜底；`liveness.py --ensure` 只能在有人唤醒时救场，
+  而"没人醒"恰好就是它死掉的后果（死锁）。
+- **判据用退出码，不要用"日志没有报错"**：`Get-ScheduledTaskInfo` 的 `LastTaskResult` 是唯一能区分
+  "被杀"与"自己退"的字段。`0xC000013A` 基本等于"控制台没了"。

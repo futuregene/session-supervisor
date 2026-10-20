@@ -142,12 +142,25 @@ def start_watchd(root):
             "no bash found (PATH, $BASH, or the Git Bash prefixes): bin/watchd.sh needs one "
             "(on Windows install Git Bash, on WSL use the Linux side)")
     out = open(os.path.join(logdir, "watchd-ensure.out"), "a", encoding="utf-8")
+    # Detach from the caller, for real.
+    #
+    # `start_new_session=True` is POSIX-only and is *silently ignored* on Windows, so a
+    # daemon started this way inherited the caller's console. When that console went
+    # away, the whole daemon was killed with CTRL_CLOSE_EVENT: measured 2026-10-20, the
+    # scheduled task ended with `LastTaskResult=3221225786` (0xC000013A,
+    # STATUS_CONTROL_C_EXIT) and the supervisor was simply dead for 18 minutes — no wake
+    # ever came, and nothing reported it, because the thing that would have reported it
+    # is the thing that died. DETACHED_PROCESS gives the child no console to lose.
+    kwargs = {"start_new_session": True}
+    if os.name == "nt":
+        kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
+        kwargs["start_new_session"] = False  # POSIX flag; keep it honest on Windows
     subprocess.Popen(
         [bash, os.path.join(root, "bin", "watchd.sh")],
         cwd=root,
         stdout=out,
         stderr=subprocess.STDOUT,
-        start_new_session=True,
+        **kwargs,
     )
 
 

@@ -109,7 +109,7 @@ python3 bin/inbox.py count
 |---|---|
 | macOS | `~/Library/LaunchAgents/<label>.plist` → `launchctl bootstrap gui/$(id -u) …` |
 | Linux | `~/.config/systemd/user/session-watch.service` → `loginctl enable-linger "$USER"` + `systemctl --user enable --now …` |
-| Windows | 任务计划程序（登录时触发）→ 动作必须是 `bash.exe <WATCH>/bin/watchd.sh` |
+| Windows | 任务计划程序（登录时触发 + **5 分钟重复触发**）→ 动作必须是 `bash.exe <WATCH>/bin/watchd.sh` |
 
 调度器**只负责让 `bin/watchd.sh` 一直活着**，不含任何业务逻辑。
 
