@@ -176,3 +176,32 @@
   而"没人醒"恰好就是它死掉的后果（死锁）。
 - **判据用退出码，不要用"日志没有报错"**：`Get-ScheduledTaskInfo` 的 `LastTaskResult` 是唯一能区分
   "被杀"与"自己退"的字段。`0xC000013A` 基本等于"控制台没了"。
+
+### D30 同一份任务在多台机器上跑：用**远端分支**当租约，别用本机文件
+- **场景**：一个定时任务（`--every 60m`）在两台桌面端各自触发，操作同一个远端分支 / 同一个 PR。
+  本机文件锁只能挡住本机的第二次，挡不住另一台机器。
+- **药方（两层，缺一不可）**：
+  1. **本机锁**：`%LOCALAPPDATA%\<任务>\lock.json`（`{host, session, acquiredAt}`），
+     年龄 ≥ 55 分钟视为死掉的上一轮、可接管；新鲜则整轮直接跳过（`action=skipped-overlap`）。
+     退出前**无论成败都要删**，否则下一轮要等到 55 分钟超时才动。
+  2. **跨机租约**：远端分支 `<prefix>-lease-<user>`，其 tip 是一个**空 commit**，subject 写持有者。
+     - 年龄由**远端 commit 的 committer date** 决定（`git log -1 --format=%ct <sha>`），不是本地时间；
+     - 新鲜（< TTL）且不是自己 → 整轮跳过（`action=lease-held`）；过期 → 接管；
+     - 接管/刷新一律 `--force-with-lease=<ref>:<刚读到的 sha>`：谁后写谁输，GitHub 端原子判胜负；
+     - 结束时只删**自己的** tip（比对 sha），删不掉就让 TTL 过期，绝不强删别人的；
+     - **TTL 必须小于触发间隔**（60 分钟任务 → 50 分钟）。否则持有者死掉后要空等一轮以上。
+      反过来，**跑得久就要中途刷新**：任何可能阻塞 >10 分钟的动作（`gh pr checks --watch`）之前重刷一次，
+      否则自己的租约在自己还活着时就过期了。
+- **身份用 ASCII 标记，不用机器名**：`sha256(machineName)[:8]` 拼进 subject（`… held by <名> [8ba990c7]`）。
+  机器名经过 PowerShell → git 的参数编码后可能变形，**认自己**只认这个 ASCII 标记，否则会把自己的租约
+  当成别人的、每轮都跳过（自锁）。
+- **PowerShell 5.1 的三个必踩点**（写这段代码时逐条踩到）：
+  - **`$HOST` 是保留变量**（自动变量 `$Host`），赋值直接报 `Cannot overwrite variable Host`；
+    同一族还有 `$HOME`（可写但危险）、`$PID`、`$?`。用 `$SWEEP_HOST` 这类带前缀的名字。
+  - **`git commit-tree` 需要 committer 身份**，而新机器/CI 上常常没有 `user.name/user.email`
+    （本仓第一次 commit 就这么失败过）。写租约时显式带上：
+    `git -c user.name='pr-sweep' -c user.email='pr-sweep@localhost' commit-tree …`。
+  - **原生命令的 stderr 会被 PS 当成错误记录**（`To <remote>`、`Everything up-to-date` 都会红屏），
+    用 `$null = git … 2>&1` 收掉，判据只看 `$LASTEXITCODE`——不要靠输出里有没有 "error" 来判胜负。
+- **验证方式**：拿一个临时 bare 仓当 origin 跑四种情形（空 → 抢到；别人新鲜 → 拒绝；
+  别人的过期 → 接管；非持有者 release → 不动）。这四种都过了再写进提示词，不要只在真仓上"试一下"。
