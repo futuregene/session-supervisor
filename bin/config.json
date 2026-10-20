@@ -1,0 +1,43 @@
+{
+  "future_bin": "future",
+  "lookback_hours": 72,
+  "exclude_sessions": [],
+  "exclude_cwd_prefix": [
+    "${WATCH}"
+  ],
+  "max_deep_checks_per_scan": 40,
+  "stall_minutes": 25,
+  "heartbeat_minutes": 5,
+  "liveness_minutes": 180,
+  "skip_idle_heartbeat": true,
+  "low_wake_minutes": 20,
+  "monitor_roll_context_percent": 30,
+  "monitor_session_name": "会话总管",
+  "monitor_roll_max_queries": 60,
+  "monitor_compact_first": false,
+  "monitor_reset_in_place": true,
+  "monitor_reset_keep_last": 2,
+  "min_wake_gap_seconds": 120,
+  "max_status_checks_per_cycle": 8,
+  "max_wakes_per_hour": 12,
+  "max_wakes_per_day": 400,
+  "scan_interval_seconds": 30,
+  "relay_skip_goal_sessions": true,
+  "scan_skip_goal_sessions": true,
+  "max_messages_per_session_4h": 3,
+  "max_messages_per_session_day": 10,
+  "max_messages_per_turn": 5,
+  "count_as_turn_window_seconds": 600,
+  "auto_approve": true,
+  "auto_approve_per_cycle": 5,
+  "auto_approve_per_hour": 20,
+  "fresh_window_hours": 24,
+  "max_events_per_scan": 25,
+  "resync_gap_seconds": 300,
+  "fold_superseded_kinds": [
+    "awaiting_user",
+    "new_session",
+    "stalled",
+    "approval_pending"
+  ]
+}

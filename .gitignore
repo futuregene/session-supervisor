@@ -1,0 +1,72 @@
+# 运行日志（易变、体积大）
+logs/
+logs/*.log
+logs/*.jsonl
+# Python 缓存
+__pycache__/
+*.pyc
+# 锁与临时文件
+state/agent.lock
+state/watchd.pid
+state/turn_payload.json
+state/append_applied.json
+*.tmp
+# macOS
+.DS_Store
+tmp-*.py
+# 工作树（AGENTS.md §1：一律建在 .worktrees/ 下，不得被提交）
+.worktrees/
+# 隐私目录（AGENTS.md §5：只跟踪 README，其余全部忽略）
+.private/*
+!.private/README.md
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 运行态目录：整个 state/ 与 inbox/ 都不进 git（2026-10-20 用户口径：
+# 「git 只放基础设施，与这台机器有关的一律存本地」）。
+#
+# 为什么整目录忽略而不是逐文件列：逐条规则已经失败过三次——2026-10-16
+# `state/approvals.jsonl` 与 `state/msg-*.txt` 两条规则被一次漏写换行粘成一条，
+# 于是录着别的会话原文的 spool 文件变成未跟踪；同一天 `notices.jsonl` /
+# `directives.jsonl` 入库时没加规则；10-17 `msg-*.md` 与 `deferred-sends.jsonl`
+# 又漏了。**漏一条就等于把别人的原文交给一次 `git add -A`。**
+# 目录级规则没有"漏一条"这种失败模式，`bin/selfcheck.py` 另有探针断言
+# `git ls-files state inbox` 为空（比逐个 check-ignore 更强）。
+#
+# 里面含什么：state/ 是唤醒计数、健康、待补发队列、一次性指令、轮换标记、
+# 已发消息正文草稿、`observed_sends.json`（guard 的 180 秒缓存，本身就是缓存）；
+# inbox/ 是扫描器事件流（`detail.lastAssistantText` 是别的会话的原文）。
+# 唯一例外：`state/SNAPSHOT.md` 曾是"指针与摘要"，但它读的也是本机状态，
+# 现在一并留在磁盘（`bin/state_snapshot.py` 每轮重写，不需要版本历史）。
+# ─────────────────────────────────────────────────────────────────────────────
+state/
+inbox/
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 「机制」与「实例」的分界（2026-10-18 用户要求「清理涉及本地信息或不通用的部分」）
+#
+# 规则：**能给别人用的留在 git（bin/ docs/ prompts/ AGENTS.md POLICY.md），
+# 只在这台机器上有意义的不进 git**。下面这些都不删，只是不跟踪——
+# 它们仍在磁盘上，运行照旧。
+# ─────────────────────────────────────────────────────────────────────────────
+
+# 本部署记忆库（用户 2026-10-18 改为：AGENTS.md/docs 只放框架，实例一律迁到这里）。
+# 它是有意维护的话题文件（见 FUTURE.md 的索引），但内容是本机路径、账号与经过，
+# **不进 git**。改它不需要 commit，也不受「工作区必须干净」约束。
+FUTURE.md
+.future/memory/
+
+# 目标控制平面的运行态：绝对 cwd、逐回合追加的 events.jsonl、**0 字节锁文件**、
+# watch.log。它是 `future goal` 的账本本体，由工具写，不由人写；跟踪它只会
+# 让每回合多出 diff，并把本机路径写进历史。（`future goal status` 照旧可读。）
+.future/
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 记录与报告（2026-10-20 用户口径）：与这台机器有关，放本地磁盘，不进 git
+#
+# 分界只有一条：**infrastructure 进 git（bin/ 含 bin/config.json、docs/、prompts/、
+# AGENTS.md、POLICY.md），凡是"这台机器上发生过什么"都留在磁盘**。
+# journal/ 与 reports/ 记的是本机会话、本机决策、本机额度与用户原话，属后者。
+# 它们仍是**唯一的持久记忆**（会话会被原地 reset），所以不要删；只是不再有远端副本。
+# ─────────────────────────────────────────────────────────────────────────────
+journal/
+reports/

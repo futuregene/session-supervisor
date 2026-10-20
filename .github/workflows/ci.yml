@@ -1,0 +1,25 @@
+name: ci
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+# The gate the PR's auto-merge waits on. Same command as local
+# `python3 bin/selfcheck.py` — a green run locally and a green run here agree.
+jobs:
+  selfcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: install tooling
+        run: python3 -m pip install --quiet pylint==3.2.7 || true
+
+      - name: selfcheck (syntax / json / guard selftest / secrets / .private / event logs)
+        run: python3 bin/selfcheck.py
