@@ -177,34 +177,33 @@
 - **判据用退出码，不要用"日志没有报错"**：`Get-ScheduledTaskInfo` 的 `LastTaskResult` 是唯一能区分
   "被杀"与"自己退"的字段。`0xC000013A` 基本等于"控制台没了"。
 
-### D30 同一份任务在多台机器上跑：用**远端分支**当租约，别用本机文件
-- **场景**：一个定时任务（`--every 60m`）在两台桌面端各自触发，操作同一个远端分支 / 同一个 PR。
-  本机文件锁只能挡住本机的第二次，挡不住另一台机器。
-- **药方（两层，缺一不可）**：
-  1. **本机锁**：`%LOCALAPPDATA%\<任务>\lock.json`（`{host, session, acquiredAt}`），
-     年龄 ≥ 55 分钟视为死掉的上一轮、可接管；新鲜则整轮直接跳过（`action=skipped-overlap`）。
-     退出前**无论成败都要删**，否则下一轮要等到 55 分钟超时才动。
-  2. **跨机租约**：远端分支 `<prefix>-lease-<user>`，其 tip 是一个**空 commit**，subject 写持有者。
-     - 年龄由**远端 commit 的 committer date** 决定（`git log -1 --format=%ct <sha>`），不是本地时间；
-     - 新鲜（< TTL）且不是自己 → 整轮跳过（`action=lease-held`）；过期 → 接管；
-     - 接管/刷新一律 `--force-with-lease=<ref>:<刚读到的 sha>`：谁后写谁输，GitHub 端原子判胜负；
-     - 结束时只删**自己的** tip（比对 sha），删不掉就让 TTL 过期，绝不强删别人的；
-     - **TTL 必须小于触发间隔**（60 分钟任务 → 50 分钟）。否则持有者死掉后要空等一轮以上。
-      反过来，**跑得久就要中途刷新**：任何可能阻塞 >10 分钟的动作（`gh pr checks --watch`）之前重刷一次，
-      否则自己的租约在自己还活着时就过期了。
-- **身份用 ASCII 标记，不用机器名**：`sha256(machineName)[:8]` 拼进 subject（`… held by <名> [8ba990c7]`）。
-  机器名经过 PowerShell → git 的参数编码后可能变形，**认自己**只认这个 ASCII 标记，否则会把自己的租约
-  当成别人的、每轮都跳过（自锁）。
-- **PowerShell 5.1 的三个必踩点**（写这段代码时逐条踩到）：
+### D30 同一份任务可能在多台机器上跑：**别用远端分支当租约**，用本机锁 + 让 push 撞车
+- **场景**：一个定时任务在多台桌面端各自触发，操作同一个远端分支 / 同一个 PR。
+- **先纠正一个曾经写在这里的错误药方**：本文件早先推荐"远端分支 `<prefix>-lease-<user>`，tip 一个空
+  commit 记持有者，TTL 到期可接管"。**这条已废弃**，业务仓 `AGENTS.md` 现在明确不要跨机租约，
+  原因是它自己引入了新的失败模式：
+  - 持有者死掉后，别的机器要空等一个 TTL；TTL 又必须小于触发间隔，于是**跑得久的合法一轮会在自己
+    还活着时租约过期**，别人接管、两边同时动同一个分支；
+  - 租约的"认自己"依赖机器名/标记的编码一致性，机器名经过 PowerShell → git 参数编码后可能变形，
+    认错就把自己的租约当成别人的，每轮都自锁跳过；
+  - 它是个**额外的分布式状态**，要自己实现原子性与过期，而 git 已经有一个：push 本身。
+- **现在按业务仓 `AGENTS.md` 的做法**：
+  1. **本机串行化用文件锁**，且只锁必须串行的那一段：`$(git rev-parse --git-dir)/finish.lock`，
+     用 `set -o noclobber`（PowerShell 用 `[System.IO.File]::Open(..., 'CreateNew', 'Write', 'None')`）
+     覆盖"合并进 `dev-<user>` + push"这一个临界区。实测：两个会话同时 `git merge --no-ff`，
+     六轮里零轮干净（`index.lock` 冲突）。锁等 10 分钟就放弃并报告，超过 10 分钟的锁视为死掉的
+     会话，删掉并说明。
+  2. **跨机器靠 push 撞车来解决**：`git push origin dev-<user>` 被拒 ⇒ `git fetch origin`、
+     rebase 到 `origin/dev-<user>`、重跑受影响的检查、再 push。**永远不 force**（合并后的 post-merge
+     reset 除外，且必须 `--force-with-lease`）。这条不需要任何共享状态：远端 ref 本身就是 CAS。
+- **所以本设施派出的这类任务（如巡检）判定"要不要动手"仍然只需要看本地事实**：`git worktree list`、
+  分支与 `origin` 的差异、有没有 open PR。**不要**再去读 `pr-sweep-lease-*` 之类的东西——
+  `origin` 上不该有它。
+- **PowerShell 5.1 的两个必踩点**（写这类脚本时真踩到）：
   - **`$HOST` 是保留变量**（自动变量 `$Host`），赋值直接报 `Cannot overwrite variable Host`；
-    同一族还有 `$HOME`（可写但危险）、`$PID`、`$?`。用 `$SWEEP_HOST` 这类带前缀的名字。
-  - **`git commit-tree` 需要 committer 身份**，而新机器/CI 上常常没有 `user.name/user.email`
-    （本仓第一次 commit 就这么失败过）。写租约时显式带上：
-    `git -c user.name='pr-sweep' -c user.email='pr-sweep@localhost' commit-tree …`。
+    同一族还有 `$HOME`、`$PID`、`$?`。用 `$SWEEP_HOST` 这类带前缀的名字。
   - **原生命令的 stderr 会被 PS 当成错误记录**（`To <remote>`、`Everything up-to-date` 都会红屏），
     用 `$null = git … 2>&1` 收掉，判据只看 `$LASTEXITCODE`——不要靠输出里有没有 "error" 来判胜负。
-- **验证方式**：拿一个临时 bare 仓当 origin 跑四种情形（空 → 抢到；别人新鲜 → 拒绝；
-  别人的过期 → 接管；非持有者 release → 不动）。这四种都过了再写进提示词，不要只在真仓上"试一下"。
 
 ### D31 改定时任务提示词前**先读库里那份**，不要从 `.private/` 的旧副本改
 
