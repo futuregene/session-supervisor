@@ -56,6 +56,12 @@ CASES = [
     ("last PR closed, not in main", {"branch_exists": True, "ahead": 2, "same_tree": False,
                                      "last_merged": {"merged": True, "number": 9,
                                                      "in_main": False}}, "open_pr"),
+    # The merge consumed the branch — GitHub's "delete branch on merge" does
+    # exactly that, and this branch is continuous: leaving it gone means the next
+    # task session has nowhere to push. Recreate it at main.
+    ("merged, branch deleted by the merge", {"branch_exists": False,
+                                             "last_merged": {"merged": True, "number": 9,
+                                                             "in_main": True}}, "recreate"),
     # ── local-only work outranks everything: it is not ours to push or reset ──
     ("local branch ahead of remote", {"branch_exists": True, "ahead": 2, "local_ahead": 1,
                                       "pr": {"number": 7, "armed": True,

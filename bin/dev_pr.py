@@ -119,6 +119,15 @@ def decide(facts):
 
     last = facts.get("last_merged") or {}
     if last.get("merged") and last.get("in_main"):
+        if not facts.get("branch_exists"):
+            # The merge consumed the branch (GitHub's "delete branch on merge"
+            # would do exactly that) and it is a *continuous* branch: put it back
+            # at the new main, or the next task session has nowhere to push.
+            return {"action": "recreate",
+                    "reason": f"#{last['number']} merged and "
+                              f"`{facts.get('branch', 'the dev branch')}` is gone; "
+                              "it is a continuous branch and must exist at main",
+                    "pr": last["number"]}
         if facts.get("same_tree"):
             return {"action": "repoint",
                     "reason": f"#{last['number']} is in main and the branch adds nothing",
@@ -240,6 +249,13 @@ def act(facts, repo, dry_run=False):
                 raise RuntimeError(f"push failed: {err[:300]}")
         run_worktree(repo, branch, "devpr-behind", merge_main)
         return f"merged origin/main into {branch}, pushed; #{verdict['pr']} will re-run"
+    if action == "recreate":
+        rc, _, err = git(repo, ["push", "origin", f"origin/main:refs/heads/{branch}"], timeout=300)
+        if rc != 0:
+            raise RuntimeError(f"recreate push failed: {err[:200]}")
+        git(repo, ["fetch", "--prune", "origin"])
+        return (f"#{verdict['pr']} merged and had removed {branch}; recreated it at origin/main "
+                "(it is a continuous branch)")
     if action == "repoint":
         _repoint(repo, branch)
         return f"#{verdict['pr']} is in main; re-pointed {branch} to origin/main (kept the branch)"

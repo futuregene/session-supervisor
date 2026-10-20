@@ -22,13 +22,14 @@
 | `fix_behind` | PR 是 `BEHIND` | 临时 worktree 里 merge `origin/main` → push，别让它来回弹 |
 | `report_red` | 必需检查红 | **另开新会话**修（见 §3），不合并、不反复重跑 |
 | `repoint` | 已合并且分支内容与 main 相同 | `git branch -f dev-<user> origin/main` + `--force-with-lease` push |
+| `recreate` | 已合并且**分支已被合并删掉** | `git push origin origin/main:refs/heads/dev-<user>` 把它建回新 main |
 | `keep_rebase` | 已合并，但分支上还有更新的提交 | 把那些提交 rebase 到新 main 上再 push（**不能丢**） |
 | `report_local_ahead` | 本地 `dev-<user>` 领先远端 | 只报告：那是别人没推的工作，不许替它 push / reset |
 
 优先级：`report_local_ahead` > （PR 存在时）`report_red` > `fix_behind` > `arm` > `waiting`
 > （无 PR 时）已合并判定 > `open_pr` > `idle`。
 
-## 2. 三件反直觉的事（判据就建在这上面）
+## 2. 四件反直觉的事（判据就建在这上面）
 
 1. **squash 合并后，分支的提交永远不是 main 的祖先。** 所以「领先 main 的提交数 > 0」
    **不等于**「没合并」。判断"已合并"只认：该 head 的最新 merged PR 的 merge commit
@@ -36,6 +37,10 @@
 2. **红了先于 BEHIND。** 给一条红的 PR 先解冲突，只是再烧一轮 CI 去看同一个失败。
 3. **本地领先远端是别人的工作。** 可能是一个还没跑完的会话，也可能是用户没推的提交；
    替它 `push` 或 `reset` 都属越界，只报告。
+4. **「合并后不删分支」是仓库设置，不是一句约定。** GitHub 的 `delete_branch_on_merge`
+   一旦为 `true`，一次合并就把长期分支删掉——分支没了，下一个任务会话无处可推，而且 PR 的
+   评审时间线随之消失。**代管前先核对**：`gh api repos/<owner>/<repo> --jq .delete_branch_on_merge`
+   应为 `false`。已经删掉的，`recreate` 会把它建回 main；但那一次 PR 的历史不会回来。
 
 ## 3. 检查红了：开新会话，不打扰写代码的那个
 
