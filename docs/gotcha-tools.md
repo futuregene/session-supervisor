@@ -130,4 +130,8 @@
   药方：`scan.cmp_path()`（两侧都过 `normcase`+`normpath`），比较还要求分隔符边界，
   免得 `D:\repo` 顺手把 `D:\repo2` 也排掉。
 - **推论**：`.sh` 不能直接当 `argv[0]` 起（Windows 上不是可执行文件），`wake.sh` 必须由 bash 拉起来。
+- **pid 有两套编号**：Git Bash 的 `$$` 是 MSYS pid（这台机器上是 311 这种小数），Windows 进程表里
+  是 23452——`liveness.py` 拿文件里的数去 `OpenProcess`，必然说"没在运行"，而扫描器明明每 30 秒在写日志。
+  药方：`watchd.sh` 写 `/proc/$$/winpid`（没有就退回 `$$`），重复启动的判断也用 `ps -W` 的第 4 列
+  （WINPID）而不是 `kill -0`；升级时用 `_any_alive` 同时按两套编号查，免得旧 pid 文件让新进程误判后起第二份。
 

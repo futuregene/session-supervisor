@@ -72,8 +72,17 @@ journalctl --user -u session-watch -n 50
 - 任务计划程序没有 launchd 的 `KeepAlive`，"重启频率"是最近似的东西；
   `liveness.py --ensure` 是兜底（唤醒回合发现它死了会拉起来）。
 
-**已知限制**：`future` CLI 在 Windows 上的行为没有在这台机器上验证过；这条路径是
-"照机制推断 + 已修掉两处会咬人的跨平台缺陷"，不是"实测通过"。
+**Windows 上必须先核对的三件事**（第一次装时逐条踩过，细节见
+[../gotcha-tools.md](../gotcha-tools.md) D27）：
+
+1. `bin/*.sh` 必须是 **LF**（仓里的 `.gitattributes` 负责；老 checkout 要 renormalize），
+   否则 Git Bash 对每一行都回 `$'\r': command not found`。
+2. `bash.exe` 与 `future.exe` 都要能被找到：`python3 bin/toolpath.py` 应当打印出三个真实路径，
+   `bash` 那行不是 `None`。
+3. `state/watchd.pid` 里必须是 **Windows 原生 pid**：Git Bash 的 `$$` 是 MSYS  pid，
+   Windows 侧查不到，`liveness.py` 会把活着的守护进程报成"未运行"。
+   `bin/watchd.sh` 用 `/proc/$$/winpid` 写原生 pid；看到 `pid=XXXX` 与
+   `Get-CimInstance Win32_Process -Filter "Name='bash.exe'"` 的 `ProcessId` 对得上才算对。
 
 ## 在这个设施里查存活
 

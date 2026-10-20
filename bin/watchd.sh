@@ -48,16 +48,47 @@ fi
 
 mkdir -p "$WATCH/logs" "$WATCH/state" "$WATCH/inbox" "$WATCH/journal" "$WATCH/reports"
 
+# `$$` is the pid of *this shell's* numbering scheme. Under Git Bash that is an
+# MSYS pid, which no Windows-side tool can look up — `bin/liveness.py` then reports
+# "watchd pid N is not running" while the daemon is plainly scanning (measured
+# 2026-10-19 on the first Windows install: pid 311 in the file, 23452 in the
+# process list). Record the native pid when the runtime exposes it, and do the
+# duplicate check in the same numbering scheme, so both readers agree.
+_is_mingw() {
+  case "$(uname -s 2>/dev/null || true)" in MINGW*|MSYS*|CYGWIN*) return 0 ;; esac
+  return 1
+}
+_alive() {
+  [ -n "$1" ] || return 1
+  if _is_mingw; then
+    # `ps -W` column 4 is the WINPID; `kill -0` would test an MSYS pid instead.
+    ps -W 2>/dev/null | awk -v p="$1" 'NR > 1 && $4 == p { found = 1 } END { exit !found }'
+  else
+    kill -0 "$1" 2>/dev/null
+  fi
+}
+_any_alive() {
+  # A pid file written before this change holds an MSYS pid, which `_alive` cannot
+  # find; fall back to the shell's own numbering so the upgrade does not start a
+  # second daemon next to the running one. `kill -0` only probes, and an unmatched
+  # pid is an error, not a signal.
+  _alive "$1" && return 0
+  kill -0 "$1" 2>/dev/null && return 0
+  return 1
+}
+SELF_PID="$(cat "/proc/$$/winpid" 2>/dev/null || true)"
+[ -n "$SELF_PID" ] || SELF_PID="$$"
+
 # never run twice
 if [ -f "$WATCH/state/watchd.pid" ]; then
   OLD="$(cat "$WATCH/state/watchd.pid" 2>/dev/null || true)"
-  if [ -n "$OLD" ] && kill -0 "$OLD" 2>/dev/null; then
+  if [ "$OLD" != "$SELF_PID" ] && [ "$OLD" != "$$" ] && _any_alive "$OLD"; then
     echo "$(date '+%F %T') [watchd] already running as pid $OLD; exiting" >> "$WATCH/logs/watchd.log"
     exit 0
   fi
 fi
-echo $$ > "$WATCH/state/watchd.pid"
-echo "$(date '+%F %T') [watchd] start pid=$$ interval=${INTERVAL}s" >> "$WATCH/logs/watchd.log"
+echo "$SELF_PID" > "$WATCH/state/watchd.pid"
+echo "$(date '+%F %T') [watchd] start pid=$SELF_PID interval=${INTERVAL}s" >> "$WATCH/logs/watchd.log"
 
 while true; do
   "$PY" "$WATCH/bin/scan.py"          >> "$WATCH/logs/scan.log"   2>&1
