@@ -311,11 +311,13 @@ def main():
     # Record what this wake has now weighed, so the same events do not wake us
     # again (has_new_pending). Written only for a wake that really happens: a
     # deferred one must still look new on the next cycle.
-    try:
-        with open(PENDING_SEEN, "w", encoding="utf-8") as fh:
-            json.dump({"ts": now, "ids": pending_ids}, fh)
-    except Exception:  # noqa: BLE001
-        log("could not record state/pending_seen.json; heartbeat falls back to no-op wakes")
+    #
+    # Order matters: this write used to happen *before* the spawn below, so any
+    # failure to start `wake.sh` silently consumed the news — the event was marked
+    # "weighed", no turn ran, and only the `liveness_minutes` floor (180 min) could
+    # recover it. Measured 2026-10-20: the spawn raised `NameError: name 'BASH'`,
+    # the events were marked seen anyway, and the supervisor was never woken between
+    # 19:17 and 21:11. Record it only after the spawn returns.
 
     health = load_json(os.path.join(WATCH, "state", "health.json"), {})
     payload = {
@@ -336,11 +338,36 @@ def main():
     with open(PAYLOAD, "w", encoding="utf-8") as fh:
         json.dump(payload, fh, ensure_ascii=False, indent=1)
 
+    # `bash_exe()` — the same discovery `liveness.py` uses — because there is no
+    # global `BASH` in this module; the old spelling raised NameError on every wake.
+    # `DETACHED_PROCESS` on Windows for the same reason as liveness.start_watchd:
+    # `start_new_session` is POSIX-only and silently ignored here, so the turn would
+    # inherit the daemon's console and die with it (see docs/gotcha-tools.md D29).
+    bash = bash_exe()
+    if not bash:
+        log("no bash found (PATH, $BASH, or the Git Bash prefixes); cannot wake")
+        return 1
+    kwargs = {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
+    if os.name == "nt":
+        kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
+    else:
+        kwargs["start_new_session"] = True
+    try:
+        subprocess.Popen([bash, os.path.join(WATCH, "bin", "wake.sh"), reason], **kwargs)
+    except Exception as exc:  # noqa: BLE001
+        # Nothing was recorded: the next cycle still sees these events as news.
+        log(f"could not start wake.sh ({type(exc).__name__}: {exc}); will retry next cycle")
+        return 1
+
+    # Only now is the wake real.
     with open(WAKES, "a", encoding="utf-8") as fh:
         fh.write(json.dumps({"ts": now, "reason": reason, "pending": len(pending),
                              "highMedium": len(interesting)}) + "\n")
-    subprocess.Popen([BASH, os.path.join(WATCH, "bin", "wake.sh"), reason],
-                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    try:
+        with open(PENDING_SEEN, "w", encoding="utf-8") as fh:
+            json.dump({"ts": now, "ids": pending_ids}, fh)
+    except Exception:  # noqa: BLE001
+        log("could not record state/pending_seen.json; heartbeat falls back to no-op wakes")
     log(f"woke supervisor: reason={reason} pending={len(pending)} highMedium={len(interesting)}")
     return 0
 
