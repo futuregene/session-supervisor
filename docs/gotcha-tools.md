@@ -205,3 +205,34 @@
     用 `$null = git … 2>&1` 收掉，判据只看 `$LASTEXITCODE`——不要靠输出里有没有 "error" 来判胜负。
 - **验证方式**：拿一个临时 bare 仓当 origin 跑四种情形（空 → 抢到；别人新鲜 → 拒绝；
   别人的过期 → 接管；非持有者 release → 不动）。这四种都过了再写进提示词，不要只在真仓上"试一下"。
+
+### D31 改定时任务提示词前**先读库里那份**，不要从 `.private/` 的旧副本改
+
+**症状**：把另一个会话刚改进的规则整段抹掉，而且没有任何报错——任务照常跑，只是少了那几条规则。
+
+**实测（我自己踩的）**：要给「dev 分支 PR 合并」加一条租约规则，
+我从 `.private/pr-sweep-prompt-v13.md`（我上午自己存的副本）改出新文本再 `future task edit --prompt-file`。
+而**另一个会话在同一小时把任务库里的版本升到了 v15**（加了「`cancelled` 不是红」等一整段，还把
+"每 3 小时值班"改成"由触发器决定"）。我的写入按"整份替换"生效 ⇒ v15 的内容被 v13 基线覆盖，
+版本号跳到 16，**只有从 v15 才开始存在的段落消失**。
+
+**为什么这是个通用坑，不只是粗心**：
+- `future task edit --prompt-file` 是**整份覆盖**，没有合并、没有"基于最新版本"的前提检查；
+- 任务库是**多会话共享的可变状态**（另一个会话/桌面面板/手机都能改），而 `.private/` 的副本是**快照**；
+- 失败完全静默：语法合法、长度合理、任务照常运行。
+
+**规定**：
+1. 改任何定时任务提示词，**源文本先用 `future task show <id> --json | jq -r .prompt` 取库里当前的**，
+   改完再写回；`.private/` 里只留**改完后**的版本，别拿旧副本当基线。
+2. 写回后立刻**逐条核对**你想要的规则与**你不该丢的规则**都在：
+   `future task show <id> --json | grep -c '<每条关键规则的特征串>'`。
+3. 发现版本号跳了不止 1（例如你以为会变 14、结果变 16），**立即怀疑有人插进来改过**：
+   ```bash
+   sqlite3 ~/.future/tasks/tasks.db \
+     "select version,status,length(prompt) from task_prompt_revisions
+      where task_id='<id>' order by version desc limit 8;"
+   sqlite3 ~/.future/tasks/tasks.db \
+     "select prompt from task_prompt_revisions where task_id='<id>' and version=<丢失的版本>;" > /tmp/recovered.md
+   ```
+   **每一次写入都会留一个 revision 行**，所以被覆盖的版本能从库里原样取回——这是补救的唯一依靠，
+   也是这条规定值得写成流程的原因。
