@@ -65,6 +65,21 @@ def save_json(path, obj):
     os.replace(tmp, path)
 
 
+def event_key(kind, key_extra, stamp, stable=False):
+    """The dedupe key of one emitted event.
+
+    `stamp` is the session's *last activity*, so it moves every time the session
+    appends anything. A key built on it therefore re-fires for an event that has
+    not changed at all. That is only right for events whose identity IS "the
+    session moved on" (`awaiting_user`, `new_session`, ...). When `key_extra` is
+    itself the identity of the event — a run id, where one run is one report —
+    pass `stable=True`, or the same failure is reported again for every later
+    record in that session (2026-10-20: one 502 was reported four times in
+    eleven minutes, each a high-priority wake).
+    """
+    return f"{kind}|{'stable' if stable else stamp}|{key_extra}"
+
+
 def future(cfg, args, timeout=120):
     exe = future_exe(cfg.get("future_bin"))
     env = dict(os.environ)
@@ -288,8 +303,10 @@ def main():
     # before the per-session loop; emit() needs it to avoid suppressing them.
     deferred_prev_set = {x for x in (state.get("deferred") or [])}
 
-    def emit(rec, base, kind, priority, summary, detail, key_extra="", stamp=None, fresh=None):
-        key = f"{kind}|{stamp if stamp is not None else base['updatedAtMs']}|{key_extra}"
+    def emit(rec, base, kind, priority, summary, detail, key_extra="", stamp=None,
+             fresh=None, stable=False):
+        key = event_key(kind, key_extra,
+                        stamp if stamp is not None else base["updatedAtMs"], stable)
         seen = rec.setdefault("emitted", [])
         if key in seen:
             return
@@ -497,12 +514,14 @@ def main():
         if last_status in ("failed", "error", "aborted"):
             # Keyed by the run id, not the session's last ordinal: with the ordinal,
             # appending any user message re-fired the same failure (the same run was
-            # reported 4 times in one morning). One run = one report.
+            # reported 4 times in one morning). One run = one report — `stable=True`
+            # is what makes that true, since `lastMs` moves with every later record
+            # in the same session (2026-10-20: four reports of one 502 in 11 min).
             emit(rec, base, "run_error", "high",
                  f"最近一次运行状态：{last_status}",
                  {"lastRunStatus": last_status, "runId": last_run_id},
                  key_extra=str(last_run_id or last_ord),
-                 stamp=lastMs, fresh=lastMs)
+                 stamp=lastMs, fresh=lastMs, stable=True)
         rec["failedRuns"] = failed
 
         appr = approvals(cfg, sid) if (streaming or last_kind == "assistant") else []

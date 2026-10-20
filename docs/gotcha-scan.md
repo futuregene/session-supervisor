@@ -14,6 +14,7 @@
 | `updatedAtMs` 被批量刷新 | 事件时间与新鲜度一律取 transcript 末条记录时间；另有 resync / bulk / 新鲜度三道闸 |
 | 裸问号误判提问 | `looks_like_question` 只看末尾一段，且要求末行是问句或含短语标记 |
 | 去重键含 ordinal 导致同一失败重报 | 去重键改用 **run id**（同一失败实测 4 条 → 1 条） |
+| 去重键掺时间戳，同一失败又重报 | `scan.py::event_key(..., stable=True)`：标识（run id）已足够定位事件时，不再把「会话最后活动」掺进去（10-20 实测 11 分钟内 4 条同一 502，每条都触发 high 唤醒） |
 | `cancelled` 被算进 `failedRuns` | 失败数改从 run ledger 派生，只认 `failed/error/aborted` |
 | 深检预算之外的会话被反复误报 `new_session` | 延迟时即写 `sig`，欠下的公告记进 `pendingNew` |
 

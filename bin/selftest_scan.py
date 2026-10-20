@@ -169,7 +169,41 @@ def main():
         if got != want:
             bad += 1
         print(f"  {'ok      ' if got == want else 'MISMATCH'} peak_degraded={got} 期望={want} :: peak {peak} vs {total}")
-    print(f"cases={len(CASES) + len(PEAK_CASES)} mismatches={bad}")
+    # `event_key` decides whether an emitted event has already been reported. The
+    # bug it fixes (2026-10-20): one failed run was reported four times in eleven
+    # minutes because the key carried the session's last-activity stamp, which
+    # moves with every later record — the run id alone is the identity.
+    print("event_key: a stable identity ignores the moving stamp")
+    # (kind, key_extra, stamp) on both sides, so one case can vary the stamp,
+    # the run id, or both.
+    KEY_CASES = [
+        # same run, later activity: one run = one report
+        ("run_error", "run_1", 1000, "run_1", 2000, True, True),
+        ("run_error", "run_1", 1000, "run_1", 9999, True, True),
+        # a different run id is news even with the same stamp
+        ("run_error", "run_1", 1000, "run_2", 1000, True, False),
+        # the old, buggy shape: the moving stamp splits one run into many events
+        ("run_error", "run_1", 1000, "run_1", 2000, False, False),
+        # awaiting_user: the stamp IS the identity, so it must still re-fire
+        ("awaiting_user", "585", 1000, "585", 2000, False, False),
+        ("awaiting_user", "585", 1000, "585", 1000, False, True),
+    ]
+    for kind, extra_a, stamp_a, extra_b, stamp_b, stable, want in KEY_CASES:
+        a = m.event_key(kind, extra_a, stamp_a, stable)
+        b = m.event_key(kind, extra_b, stamp_b, stable)
+        got = a == b
+        if got != want:
+            bad += 1
+        print(f"  {'ok      ' if got == want else 'MISMATCH'} same_key={got} 期望={want} "
+              f":: {kind} {extra_a}@{stamp_a} vs {extra_b}@{stamp_b} stable={stable}")
+    if not m.event_key("run_error", "run_1", 1000, True).split("|")[1].isdigit():
+        print(f"  ok       stable key carries no stamp :: "
+              f"{m.event_key('run_error', 'run_1', 1000, True)}")
+    else:
+        bad += 1
+        print("  MISMATCH stable key still carries a stamp")
+
+    print(f"cases={len(CASES) + len(PEAK_CASES) + len(KEY_CASES)} mismatches={bad}")
     return 1 if bad else 0
 
 
