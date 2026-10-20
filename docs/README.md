@@ -23,6 +23,7 @@
 | 文件 | 何时读 |
 |---|---|
 | [architecture.md](architecture.md) | 想知道"为什么被唤醒""某脚本干什么" |
+| [task-review.md](task-review.md) | 收到 `task_review` / `task_run_failed` / `task_run_empty`，或要改某个定时任务的提示词 |
 | [throttle-and-budget.md](throttle-and-budget.md) | 调唤醒频率/预算，或怀疑被限流、被误报刷屏 |
 | [runbooks/operations.md](runbooks/operations.md) | 设施疑似不工作、要核查状态、或做只读巡检 |
 | [runbooks/limits.md](runbooks/limits.md) | 判断某结论可不可信、或想知道什么还没验证 |

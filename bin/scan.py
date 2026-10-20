@@ -21,6 +21,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # the user asked (2026-10-16) that goal-launched workers neither receive relay
 # messages nor wake the supervisor at all.
 import goal_sessions  # noqa: E402
+# Scheduled-task runs of tasks that delete their session: the only channel that can
+# turn "that hourly task ran again" into a review, instead of a memory (bin/taskruns.py).
+import taskruns  # noqa: E402
 
 # Locating `future`/`python3`: discovery, not a hardcoded Homebrew path (see toolpath.py).
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -569,6 +572,30 @@ def main():
     if deferred_now:
         log(f"deep-check budget reached ({max_deep}); deferring {len(deferred_now)} sessions to next scan")
     state["deferred"] = deferred_now
+
+    # --- scheduled-task runs ------------------------------------------------
+    # A task with `session retention = delete` settles and its conversation is gone
+    # before the next scan (30 s apart), so nothing above can ever see it: measured
+    # 2026-10-21, 8 of 13 tasks work that way and the hourly dev-PR task had 9 runs
+    # that no event had ever mentioned. Its ledger survives, so this is the one place
+    # where a *review* can be triggered rather than hoped for. `taskruns.collect`
+    # throttles itself (`task_poll_seconds`), baselines a task on first sight, and
+    # never emits twice for one run id.
+    task_events = []
+    if not baseline and cfg.get("task_watch_enabled", True):
+        try:
+            task_events, tr_state = taskruns.collect(cfg, now_ms=now_ms)
+            taskruns.save_json(taskruns.STATE_PATH, tr_state)
+            if tr_state.get("lastError"):
+                log(f"task poll: {tr_state['lastError']}")
+        except Exception as exc:  # noqa: BLE001
+            log(f"task poll skipped ({type(exc).__name__}: {exc})")
+        room = max_events - len(events)
+        for ev in task_events[:max(room, 0)]:
+            events.append(ev)
+            log(f"event {ev['kind']}/{ev['priority']} task:{ev.get('sessionName')} :: {ev['summary'][:80]}")
+        if len(task_events) > max(room, 0):
+            log(f"task events dropped by per-scan cap: {len(task_events) - max(room, 0)}")
     state["lastScanTs"] = now
 
     # prune very old session state (but never while the list is degraded: a session
@@ -589,7 +616,7 @@ def main():
     health = {"ts": now, "ok": True, "baseline": baseline, "resync": resync, "bulk": bulk,
               "sessionsTotal": len(all_sessions),
               "active": len(active), "deepChecked": deep, "deferred": len(deferred_now),
-              "events": len(events)}
+              "events": len(events), "taskEvents": len(task_events)}
     if degraded:
         health["degraded"] = degraded
     save_json(HEALTH_PATH, health)

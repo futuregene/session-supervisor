@@ -46,6 +46,7 @@ runbooks/supervisor-daemon.md）——只负责让下一行一直活着
 | `bin/guard.py` | 防打转：`check <id>` / `record <id> "<note>"` / `show`。**口径以回读 transcript 为准**（`observed_sends()`），`state/sent.jsonl` 只是自己记的、会漏 | `state/sent.jsonl`、`state/observed_sends.json`（180s 缓存） |
 | `bin/send.py` | 唯一的转达通道：抬头、两道闸、额度、待补发队列 | `state/sent.jsonl`、`state/deferred-sends.jsonl` |
 | `bin/toolpath.py` | 统一发现 `future` / `python3` 可执行文件 | stdout |
+| `bin/taskruns.py` | 定时任务台账 → 事件：失败/空输出/该复盘了；`digest` 写复盘摘录 | `state/taskruns.json`、`state/task-digests/` |
 | `bin/selfcheck.py` | 全部静态探针（= PR 的 CI） | stdout |
 
 ## 事件种类
@@ -58,8 +59,12 @@ runbooks/supervisor-daemon.md）——只负责让下一行一直活着
 | `awaiting_user` | low | 一轮刚结束 | **不要默认搁置**——查收尾是否还有缺口、是否有人在等回复 |
 | `stalled` | medium | streaming 中长时间无新记录 | 判断真卡假卡，可恢复则催一次 |
 | `new_session` | low | 新会话出现 | 默认积极，看是否值得介入（见 `POLICY.md` §A） |
+| `task_run_failed` | high | 定时任务某一轮非成功结束 | 读错误；可改提示词避免就改，平台侧则记录（见 [task-review.md](task-review.md)） |
+| `task_run_empty` | medium | 定时任务“完成”了但无任何输出 | 查是否被指示“无需动作就不输出” |
+| `task_review` | medium | 定时任务已积累 N 轮未复盘 | 读 `taskruns.py digest`，改就改提示词，最后 `reviewed <id>` |
 
 同一会话同一状态只报一次（去重键含事件类型、时间戳与 ordinal，见 `scan.py::emit`）。
+`task_*` 三类来自 `taskruns.py`：**无会话可看**（任务跑完即删会话），按 run id 去重，任务第一次被看见时只建基线。
 
 ## 状态文件
 

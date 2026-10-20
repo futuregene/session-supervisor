@@ -20,6 +20,9 @@
    > （`--limit` 从**头**往后数；取末尾必须用 `peek.py`。）
 3. **处置** — 按 `AGENTS.md` §2 的顺序逐条处理；kind→处置对照见 `docs/architecture.md`。
    **默认自主、积极处置**：`POLICY.md` §B 白名单之外的都要推进（含 low 事件）。白名单才升级。
+   > `task_review` / `task_run_failed` / `task_run_empty` 来自定时任务台账（那些任务跑完就删会话，
+   > **没有会话可看**）：照 `docs/task-review.md` 做——`bin/taskruns.py digest <id>` 读摘录 →
+   > 决定改不改提示词 → `bin/taskruns.py reviewed <id>`。**不做最后这一步 = 这一轮没复盘。**
    > **改本设施自身已获授权**（自我迭代：`POLICY.md`/`bin/config.json`/`prompts/`/`bin/`/`docs/`/`AGENTS.md`，
    > 走 worktree+PR+CI；**PR 与合并全程自动、不问用户**）。
    > 拿不准"要不要替他拿主意"时：**先查 `.private/profile/` 与 `bin/recall.py`，再决定答还是问**。

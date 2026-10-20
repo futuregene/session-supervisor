@@ -135,6 +135,20 @@ def check_notice_selftest() -> tuple[bool, str]:
     return p.returncode == 0, (tail[-1] if tail else f"exit {p.returncode}")
 
 
+def check_taskruns_selftest() -> tuple[bool, str]:
+    """A run must become an event exactly once, and a review must ask for itself.
+
+    The whole point of `taskruns.py` is that it is not remembered into existence: a
+    task whose session is deleted leaves only its ledger, and the review has to be
+    triggered by that ledger (user, 2026-10-21). The selftest pins the three
+    properties that make it trustworthy — history is baselined rather than replayed,
+    one run never yields two events, and the counter reaches a review on its own.
+    """
+    p = run([sys.executable, os.path.join(ROOT, "bin", "selftest_taskruns.py")])
+    tail = (p.stdout or "").strip().splitlines()
+    return p.returncode == 0, (tail[-1] if tail else f"exit {p.returncode}")
+
+
 def check_ensure_append_selftest() -> tuple[bool, str]:
     """Editing the manual must not make every wake carry it twice.
 
@@ -609,6 +623,7 @@ CHECKS = [
     ("inbox fold selftest", check_inbox_selftest),
     ("prompt split", check_prompt_split),
     ("notice/directives selftest", check_notice_selftest),
+    ("taskruns selftest", check_taskruns_selftest),
     ("send selftest", check_send_selftest),
     ("roll selftest", check_roll_selftest),
     ("lock selftest", check_lock_selftest),

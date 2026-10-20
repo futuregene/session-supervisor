@@ -39,5 +39,11 @@
     "new_session",
     "stalled",
     "approval_pending"
-  ]
+  ],
+  "task_watch_enabled": true,
+  "task_watch": [],
+  "task_poll_seconds": 120,
+  "task_review_every_runs": 6,
+  "task_review_max_hours": 24,
+  "task_run_seen_cap": 40
 }
