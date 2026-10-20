@@ -178,6 +178,20 @@ def check_prune_selftest() -> tuple[bool, str]:
     tail = (p.stdout or "").strip().splitlines()
     return p.returncode == 0, (tail[-1] if tail else f"exit {p.returncode}")
 
+def check_dev_pr_selftest() -> tuple[bool, str]:
+    """The dev-branch PR policy: two silent, expensive mistakes are pinned.
+
+    Merging a red PR puts a broken `main` in front of every other session; and a
+    *squash-merged* branch never has its own commits as ancestors of `main`, so
+    "commits ahead" is not "unmerged" — treating it that way re-opens the same PR
+    or re-points over work that has not landed. `selftest_dev_pr.py` pins both,
+    plus the local-ahead case (never ours to push or reset).
+    """
+    p = run([sys.executable, os.path.join(ROOT, "bin", "selftest_dev_pr.py")])
+    tail = (p.stdout or "").strip().splitlines()
+    return p.returncode == 0, (tail[-1] if tail else f"exit {p.returncode}")
+
+
 def check_lock_selftest() -> tuple[bool, str]:
     """The supervisor's single-flight lock has to actually exclude.
 
@@ -602,6 +616,7 @@ CHECKS = [
     ("roll selftest", check_roll_selftest),
     ("lock selftest", check_lock_selftest),
     ("prune selftest", check_prune_selftest),
+    ("dev-pr selftest", check_dev_pr_selftest),
     ("liveness selftest", check_liveness_selftest),
     ("ensure-append selftest", check_ensure_append_selftest),
     ("no secrets in tracked files", check_no_secrets),
