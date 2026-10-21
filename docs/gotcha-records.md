@@ -66,3 +66,19 @@
   ② **只留最终 pin**：每个已发布数字留**一份** union/汇总产物，中间产物、探针树、构建目录照删。
 - **记录里写产物时要带状态**（`retained at <path>` / `not retained — re-measure §x`）：
   只写路径不写状态，读者会默认它还有效。
+
+### E14 PowerShell 双引号 here-string 会把 Markdown 代码段的**反引号当转义符吃掉**
+
+- **成因**：`@"..."@` 是**可转义**字符串。文本里 `` `r `` `` `f `` `` `a `` `` `t `` `` `b `` `` `0 ``
+  分别变成 CR / FF / BEL / TAB / BS / NUL，而它们的 `\r`、`\f` 前缀字符**一起消失**。
+  于是 `` `fix/agent-ready-order-v2` `` 落盘成 `FF + "ix/agent-ready-order-v2"`，
+  在编辑器里看不见、`Select-String` 也照样匹配——**直到有人渲染 Markdown 或 grep 控制字符才发现**。
+- **判据**：记录文件里出现**行内控制字符**（除 `\n`/`\r\n`）。一条命令查：
+  `python3 -c "import sys;s=open(sys.argv[1],'rb').read().decode('utf-8','replace');print([(hex(ord(c)),i) for i,c in enumerate(s) if ord(c)<32 and c not in '\n\r'])" <file>`
+- **对策**：给 `journal/` `reports/` 这类 Markdown 记录，
+  ① **首选 `write`/`edit` 工具**（不经 shell，不转义）；
+  ② 非要用 shell 时用**单引号** here-string `@'...'@`（不转义反引号）或 `Add-Content -Value ([IO.File]::ReadAllText($src))`；
+  ③ 已经写坏的：按逆向映射还原（FF→`` `f ``、BEL→`` `a ``、TAB→`` `t ``、BS→`` `b ``、NUL→`` `0 ``、孤立 CR→`` `r ``），
+  再补上被吞掉的**收尾反引号**，最后复查控制字符为 0。
+- **为什么记忆深刻**：一次会话里 4 个记录文件共 22 处代码段被打断，`git` 命令、commit 号、路径全变了样；
+  而这些文件是**唯一持久记忆**（会话会被 reset），坏了没有第二份。
