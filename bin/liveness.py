@@ -85,6 +85,21 @@ def pid_alive(pid):
             return True
         except Exception:  # noqa: BLE001
             return False
+    # Git Bash / MSYS2 (Cygwin) wrinkle: `watchd.sh` writes its *Cygwin* pid, but
+    # OpenProcess needs the Windows pid. /proc/<pid>/winpid exists inside a Cygwin
+    # bash but the Windows-native python.exe cannot see /proc at all — read it
+    # through bash. Plain Windows is unaffected (bash absent → subprocess fails →
+    # we fall back to the raw pid).
+    try:
+        import subprocess
+        probe = subprocess.run(["bash", "-c", f"cat /proc/{pid}/winpid 2>/dev/null"],
+                               capture_output=True, text=True, timeout=5,
+                               creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        win_pid = probe.stdout.strip()
+        if win_pid.isdigit():
+            pid = int(win_pid)
+    except (OSError, subprocess.SubprocessError):
+        pass
     return _pid_alive_windows(pid)
 
 

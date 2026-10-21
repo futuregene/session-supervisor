@@ -17,7 +17,7 @@ _add_path() {
   PATH="${PATH:+$PATH:}$1"
 }
 for d in "${FUTURE_TOOLBIN:-}" /opt/homebrew/bin /usr/local/bin "$HOME/.local/bin" \
-         /usr/bin /bin /usr/sbin /sbin; do
+         "/d/工作软件/FutureOS" "/d/工作软件/python" /usr/bin /bin /usr/sbin /sbin; do
   _add_path "$d"
 done
 # Git Bash / Cygwin on Windows: the inherited PATH is the Windows PATH already in
@@ -36,7 +36,14 @@ export PATH
 FUTURE="$(command -v future || true)"
 [ -n "$FUTURE" ] || FUTURE="future"
 PY="$(command -v python3 || true)"
-[ -n "$PY" ] || PY="/usr/bin/python3"
+[ -n "$PY" ] || PY="$(command -v python || true)"
+# Windows wrinkle: the WindowsApps `python3` alias is an install-stub — it opens the
+# Microsoft Store and exits 49 without running anything, so every "$("$PY" …)" below
+# silently produced nothing (scanner never wrote health.json; 2026-10-21). Probe once;
+# if the stub can't even run `pass`, fall back to the real `python`.
+if [ -n "$PY" ] && ! "$PY" -c "pass" 2>/dev/null; then
+  PY="$(command -v python || true)"
+fi
 # The documented knob is `config.scan_interval_seconds`; the env var is an override
 # for tests. Before this line the shell used its own default and ignored the config
 # entirely, so editing bin/config.json silently changed nothing (docs/architecture.md

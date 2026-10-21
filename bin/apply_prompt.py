@@ -42,6 +42,10 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from toolpath import future_exe, tool_path  # noqa: E402
 
 WATCH = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# Model used for the one-shot canary probe only (see canary_verify). Keep it a
+# model that is live and paid on this host; the supervisor session's own model
+# is decided in §3 of INSTALL.md, not here.
+CANARY_MODEL = "westlake/glm-flash"
 FUTURE = future_exe()
 MONITOR_FILE = os.path.join(WATCH, "state", "monitor_session.txt")
 APPEND_MD = os.path.join(WATCH, "prompts", "append.md")
@@ -96,6 +100,11 @@ def canary_verify(manual):
         sid = json.loads(out).get("sessionId", "")
         if not sid:
             return False, "session new returned no id", ""
+        # This host (2026-10-20): the default `future/deepseek-flash` provider
+        # answers HTTP 402 (balance exhausted), which reads to the canary as
+        # "the model never saw the append". Pin the canary run to a live model
+        # so the probe tests *delivery*, not the provider's billing status.
+        future(["session", "set", sid, "--model", CANARY_MODEL], timeout=60)
         # The instruction lives *in the append*, not in the user turn. Asked to
         # echo a marker found in its system prompt, the model refused — correctly:
         # that is what an exfiltration probe looks like (2026-10-16 08:58, the
