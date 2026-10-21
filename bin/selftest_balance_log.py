@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import os
 import pathlib
 import sys
 import tempfile
@@ -101,7 +102,8 @@ def main() -> int:
     ns = type("A", (), {"to": str(target)})()
     mod.cmd_install(ns)
     mod.__file__ = str(ROOT / "bin" / "balance_log.py")  # install always copies *this* file
-    check("install writes an executable copy", target.exists() and (target.stat().st_mode & 0o111),
+    check("install writes an executable copy",
+          target.exists() and (target.stat().st_mode & 0o111 or os.name == "nt"),
           f"{target} exists={target.exists()}")
     check("the installed copy is byte-identical", target.read_bytes() == src)
     before = target.stat().st_mtime_ns

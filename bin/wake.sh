@@ -23,7 +23,7 @@ _add_path() {
   PATH="${PATH:+$PATH:}$1"
 }
 for d in "${FUTURE_TOOLBIN:-}" /opt/homebrew/bin /usr/local/bin "$HOME/.local/bin" \
-         /usr/bin /bin /usr/sbin /sbin; do
+         "/d/工作软件/FutureOS" "/d/工作软件/python" /usr/bin /bin /usr/sbin /sbin; do
   _add_path "$d"
 done
 # Git Bash / Cygwin on Windows: the inherited PATH is the Windows PATH already in
@@ -49,7 +49,13 @@ export PYTHONUTF8=1
 FUTURE="$(command -v future || true)"
 [ -n "$FUTURE" ] || FUTURE="future"
 PY="$(command -v python3 || true)"
-[ -n "$PY" ] || PY="/usr/bin/python3"
+[ -n "$PY" ] || PY="$(command -v python || true)"
+# Same Windows wrinkle as watchd.sh: a WindowsApps `python3` alias stub exits 49
+# without running anything, so the wake would compose an empty card. Probe once and
+# fall back to the real `python` if the stub can't run code.
+if [ -n "$PY" ] && ! "$PY" -c "pass" 2>/dev/null; then
+  PY="$(command -v python || true)"
+fi
 REASON="${1:-events}"
 TS="$(date +%Y%m%d-%H%M%S)"
 LOG="$WATCH/logs/wake-$TS-$REASON.log"

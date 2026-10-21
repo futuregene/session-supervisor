@@ -111,6 +111,11 @@ def future(cfg, args, timeout=120):
     exe = future_exe(cfg.get("future_bin"))
     env = dict(os.environ)
     env["PATH"] = tool_path()
+    # This host: the console code page is GBK and `future --json` emits UTF-8
+    # (Chinese session titles crash the GBK reader thread → stdout=None →
+    # "the JSON object must be str…"). Force UTF-8 on every pipe.
+    env["PYTHONUTF8"] = "1"
+    env["PYTHONIOENCODING"] = "utf-8"
     try:
         p = subprocess.run([exe] + args, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout, env=env)
         return p.returncode, p.stdout, p.stderr

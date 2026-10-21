@@ -169,7 +169,10 @@ print("the real prompts")
 check("prompts/append.md exists", os.path.exists(os.path.join(ROOT, "prompts", "append.md")), True)
 check("prompts/turn.md exists", os.path.exists(os.path.join(ROOT, "prompts", "turn.md")), True)
 real = turn_prompt.compose(ROOT)
-check("real composition is non-empty", len(real) > 500, True)
+# In minimal mode (append canary-verified) the card alone is ~493 B; in full
+# mode the manual is prepended and it is much larger. Both are healthy — what
+# this check guards is an empty/failed composition.
+check("real composition is non-empty", len(real) > 100, True)
 manual = open(os.path.join(ROOT, "prompts", "append.md"), encoding="utf-8").read()
 check("real manual names the lock step", "lock.py acquire" in manual, True)
 check("real manual names peek.py", "peek.py" in manual, True)
