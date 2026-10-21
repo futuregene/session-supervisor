@@ -55,6 +55,17 @@
   看清是什么，核对内容是否已在远端（`git show origin/main:<file> | grep`），
   再决定"转 PR"还是"确认无内容丢失后 `git reset --hard origin/main`"。
 
+- **E8 的第二种形态**：指向同一分支的**并发**回合里，A 回合
+  `git merge <feature>` 进本地 `dev-<user>`、B 回合随后 `git reset --hard origin/dev-<user>`，
+  那个合并提交当场从分支上消失，只剩 reflog —— `git branch --contains <sha>` 返回空、
+  `git worktree list` 干净、`git status` 干净，**看起来什么都没发生**。
+  判据：`git reflog show dev-<user>` 里出现成对的
+  `merge <branch>: Merge made by ...` / `reset: moving to origin/dev-<user>`。
+  处置：**先把每个被 reset 掉的合并提交的 sha 记下来**（reflog 里就有），再逐个核对内容是否已在 origin
+  （`git diff origin/dev-<user> <sha> -- <该合并触及的路径>` 为空即已落地）；只有在 origin 完全没有时，
+  才从那个 sha 切分支补推（`git worktree add -b rescue/<name> origin/dev-<user>` + `git cherry-pick <sha>`）。
+  **不要**因为 `branch --contains` 为空就判定"没丢"——内容可能在、提交可能不在，这两件事要分开核。
+
 ### E12 `git rm --cached` 只改**索引**，但合并会在**别的 checkout 删掉文件**
 - **成因**：提交说的是"这些路径不存在"，合到别的 checkout 时那里的工作副本就被删了。
 - **对策**：移出 git 时**要么在主 checkout 原地做**，**要么合并后立刻从父提交恢复**（`git show <旧提交>:<path> > <path>`，
