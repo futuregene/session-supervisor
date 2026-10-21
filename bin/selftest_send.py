@@ -90,19 +90,27 @@ class Recorder:
         return 0, "OK (4h 0, 24h 0)", ""
 
     def shell_run(self, *args, **kwargs):
-        """A relay is launched through bash; never let the test actually send."""
+        """The relay runs in a child process; never let the test actually send."""
         self.launched.append(("run", args))
         return type("R", (), {"returncode": 0})()
 
     def shell_popen(self, *args, **kwargs):
         self.launched.append(("popen", args))
-        return type("P", (), {"returncode": 0})()
+        spawn_rc = getattr(self, "spawn_rc", None)
+        return type("P", (), {"poll": lambda _self: spawn_rc, "returncode": spawn_rc})()
 
 
 class FakeSubprocess:
-    """Only the two launchers are faked, but `DEVNULL` must still exist."""
+    """Only the launchers are faked, but the module constants must still exist.
+
+    `spawn_delivery` reads `CREATE_NEW_PROCESS_GROUP`/`DETACHED_PROCESS` under
+    `getattr` precisely so a fake without them cannot break the relay path; they are
+    declared here anyway, to keep the fake honest about the real module's surface.
+    """
 
     DEVNULL = os.devnull
+    CREATE_NEW_PROCESS_GROUP = 0
+    DETACHED_PROCESS = 0
 
     def __init__(self, rec):
         self._rec = rec
@@ -423,6 +431,8 @@ check("neither reader works → no cwd (never the caller's)", cwd, None)
 check("and it says why", "cannot read" in why, True)
 
 print("--new: a new feature gets its own session in its own repo")
+# Keep the spawn watch short: the real 8 s is right for production and pointless here.
+send.SPAWN_CHECK_SECONDS = 0.3
 # The user's rule (2026-10-16): reusing a session carries its history into the new
 # work, so a new feature is dispatched into a fresh session created in that repo.
 with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False, encoding="utf-8") as fh:
@@ -437,14 +447,16 @@ check("it created a session", len(created), 1)
 check("in the repo it was given", created[0][1][created[0][1].index("--cwd") + 1],
       tempfile.gettempdir())
 check("named after the feature", created[0][1][created[0][1].index("--name") + 1], "导出 PDF")
-launched = rec.launched[0][1][0][2]  # ("popen", (["bash", "-c", script],)) → script
-check("and the work order went to the NEW session", "NEW-SID" in launched, True)
-check("never to the reused one", "--session sid " in launched, False)
-# The path is embedded with json.dumps (so bash sees one argument), which doubles
-# backslashes on Windows: compare against the escaped form, not the raw path.
-check("--cwd of the run is the repo, not the caller",
-      json.dumps(tempfile.gettempdir())[1:-1] in launched, True)
-check("the topic survived", "--note" not in launched and "新功能" in open(
+# The launch is now an argument list — `[python, send.py, --deliver, log, timeout, sid,
+# cwd, framed_file]` — so inspect the list, not a shell string. The old form could only
+# be checked by string-matching a bash command line, which is part of why the backslash
+# mangling in `--cwd` went unnoticed (2026-10-21).
+launched = rec.launched[0][1][0]
+check("it launched the delivery helper", launched[2], "--deliver")
+check("and the work order went to the NEW session", launched[5], "NEW-SID")
+check("never to the reused one", "sid" not in launched[5], True)
+check("--cwd of the run is the repo, not the caller", launched[6], tempfile.gettempdir())
+check("the topic survived", "新功能" in open(
     os.path.join(send.WATCH, "state", "relay-out.txt"), encoding="utf-8").read(), True)
 
 rec = with_recorder(False, new_rc=1)
@@ -457,6 +469,34 @@ check("a missing --cwd is refused",
       run_main(["--new", "--cwd", "/nope/does/not/exist", feature_file]), 1)
 check("and nothing is launched", rec.launched, [])
 os.unlink(feature_file)
+
+print("delivery is verified, not assumed")
+# Regression (2026-10-21). The relay used to be `bash -c "timeout … $(cat …)"` and
+# `main()` printed `sent` unconditionally, after clearing the deferred queue. Two
+# relays were lost that way — one exited 126 (`/usr/bin/timeout: Permission denied`),
+# a second exited 127 (bash ate the backslashes in the --cwd path) — and both looked
+# delivered on screen. The target sessions never saw either message.
+with tempfile.TemporaryDirectory() as d:
+    body = os.path.join(d, "m.txt")
+    with open(body, "w", encoding="utf-8") as fh:
+        fh.write("please act on this\n")
+
+    rec = with_recorder(False)
+    code = run_main(["target-sid", body, "--note", "probe"])
+    check("a delivered relay exits 0", code, 0)
+    check("it is recorded (budget spent)", rec.recorded, True)
+    check("it was actually launched", [c[0] for c in rec.launched], ["popen"])
+    check("and it is not queued", deferred_rows(), [])
+
+    rec = with_recorder(False)
+    rec.spawn_rc = 126          # what `/usr/bin/timeout: Permission denied` looked like
+    code = run_main(["target-sid", body, "--note", "probe"])
+    check("a relay that dies immediately exits non-zero", code, 2)
+    check("it does not spend the send budget", rec.recorded, False)
+    rows = deferred_rows()
+    check("the message is queued instead of lost", len(rows), 1)
+    check("the reason says the relay failed",
+          bool(rows) and "relay failed" in rows[0]["reason"], True)
 
 if FAILED:
     print("selftest_send: FAILED")

@@ -48,13 +48,15 @@ import goal_sessions  # noqa: E402
 
 # Locating `future`/`python3`: discovery, not a hardcoded Homebrew path (see toolpath.py).
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from toolpath import future_exe, tool_path, config_path, bash_exe  # noqa: E402
+from toolpath import future_exe, tool_path, config_path  # noqa: E402
 FUTURE = future_exe()
-# The relay is a bash one-liner (`$(cat ...)`, `timeout`), so it needs a real bash.
-# On Windows that is Git Bash, which is not on PATH by default — resolve it like
-# the other tools instead of assuming the spelling works everywhere.
-BASH = bash_exe() or "bash"
+# No bash in this file any more: the relay used to be a bash one-liner and that is
+# exactly what broke it (see `deliver()`). `future run` takes an argument list now.
 LOGDIR = os.path.join(WATCH, "logs")
+# How long `spawn_delivery` watches a freshly started relay before calling it in flight.
+# Long enough for an immediate failure (`command not found`, permission denied), short
+# enough not to hold the turn. A module constant so the selftest need not sleep.
+SPAWN_CHECK_SECONDS = 8.0
 # A relayed message starts with this heading (see `frame()`); the legacy form
 # `[会话总管 <id> 转达] …` is still recognised so old sends keep being counted.
 RELAY_HEADING = "### 会话总管转达"
@@ -477,7 +479,89 @@ def main_new(argv):
     return main(forwarded)
 
 
+def deliver(log, timeout, sid, cwd, framed_file):
+    """Run the relay in-process and record its exit code. No shell, no `timeout`.
+
+    The previous spelling built a bash one-liner with `timeout <secs> <future> run …
+    "$(cat <file>)"`. Two independent things broke it on Windows (2026-10-21):
+
+      * `timeout` is not usable from this Git Bash — `/usr/bin/timeout` exists but
+        reports `Permission denied` (exit 126), so the run never started;
+      * the `--cwd` value went through `json.dumps` and then bash's double-quoted
+        parsing, which ate the backslashes (`C:Usersunmer.futurebinfuture.EXE`,
+        exit 127) — one earlier relay died this way and nobody noticed either.
+
+    Both failures happen *after* `send.py` has printed `sent`, which is the whole
+    problem: a relay that never left the machine looked exactly like a delivered
+    one, and `state/deferred-sends.jsonl` had already been cleared. Doing the run
+    here removes the shell from the path (argument list, not a command line) and
+    the timeout moves to `subprocess.run(timeout=…)`, which needs nothing external.
+    """
+    args = [FUTURE, "run", "--session", sid, "--cwd", cwd,
+            open(framed_file, encoding="utf-8").read()]
+    os.makedirs(os.path.dirname(log), exist_ok=True)
+    rc = 1
+    with open(log, "a", encoding="utf-8") as fh:
+        fh.write(f"=== relay {time.strftime('%Y-%m-%d %H:%M:%S')} session={sid} timeout={timeout}s ===\n")
+        fh.flush()
+        try:
+            p = subprocess.run(args, stdout=fh, stderr=fh, timeout=timeout)
+            rc = p.returncode
+        except subprocess.TimeoutExpired:
+            fh.write(f"relay timed out after {timeout}s\n")
+            rc = 124
+        except Exception as exc:  # noqa: BLE001 — the log is the only witness
+            fh.write(f"relay could not start ({type(exc).__name__}: {exc})\n")
+            rc = 127
+        fh.write(f"exit:{rc}\n")
+    return rc
+
+
+def log_tail(log, limit=600):
+    try:
+        with open(log, encoding="utf-8", errors="replace") as fh:
+            return fh.read()[-limit:].strip()
+    except OSError:
+        return ""
+
+
+def spawn_delivery(log, timeout, sid, cwd, framed_file):
+    """Start `deliver` in a detached child, then say whether it really started.
+
+    Detached for the same reason `liveness.start_watchd` is: `start_new_session` is
+    POSIX-only and silently ignored on Windows, so a child started that way inherits
+    the caller's console and dies with it (docs/gotcha-tools.md D29).
+
+    The return value is the point: the old code returned success unconditionally, so
+    the caller could not tell "delivered" from "never left the machine". This waits a
+    few seconds — long enough for an immediate failure like `command not found`, short
+    enough not to hold the turn — and reports what actually happened.
+    """
+    kwargs = {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
+    if os.name == "nt":
+        # `getattr`: the selftest swaps `subprocess` for a fake that only needs
+        # DEVNULL/run/Popen, and a missing constant must not turn into an AttributeError
+        # on the relay path (it did, in the first version of this function).
+        kwargs["creationflags"] = (getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+                                   | getattr(subprocess, "DETACHED_PROCESS", 0))
+    else:
+        kwargs["start_new_session"] = True
+    proc = subprocess.Popen(
+        [sys.executable, os.path.abspath(__file__), "--deliver",
+         log, str(timeout), sid, cwd, framed_file], **kwargs)
+    deadline = time.time() + float(SPAWN_CHECK_SECONDS)
+    while time.time() < deadline:
+        if proc.poll() is not None:
+            return proc.returncode
+        time.sleep(0.2)
+    return None  # still running: the run is in flight, which is what we want
+
+
 def main(argv):
+    if argv[:1] == ["--deliver"]:
+        # Internal: the detached child that actually performs the relay.
+        _log, _timeout, _sid, _cwd, _framed = argv[1:6]
+        return 0 if deliver(_log, int(_timeout), _sid, _cwd, _framed) == 0 else 1
     if "--new" in argv:
         return main_new(argv)
     if len(argv) < 2:
@@ -555,18 +639,26 @@ def main(argv):
     os.makedirs(os.path.dirname(framed_file), exist_ok=True)
     with open(framed_file, "w", encoding="utf-8") as fh:
         fh.write(text)
-    script = (f"cd {json.dumps(os.path.dirname(text_file))} && "
-              f"timeout {timeout} {FUTURE} run --session {sid} --cwd {json.dumps(cwd)} "
-              f"\"$(cat {json.dumps(framed_file)})\" "
-              f">> {json.dumps(log)} 2>&1; echo \"exit:$?\" >> {json.dumps(log)}")
     if wait:
-        subprocess.run([BASH, "-c", script], timeout=timeout + 60)
+        rc = deliver(log, timeout, sid, cwd, framed_file)
+        if rc != 0:
+            defer(sid, text_file, note, f"relay failed (exit {rc})")
+            print(f"relay FAILED (exit {rc}) — {sid} did not receive this message; "
+                  f"queued in state/deferred-sends.jsonl.\n{log_tail(log)}")
+            return 2
     else:
-        subprocess.Popen([BASH, "-c", script], stdout=subprocess.DEVNULL,
-                         stderr=subprocess.DEVNULL, start_new_session=True)
+        early = spawn_delivery(log, timeout, sid, cwd, framed_file)
+        if early is not None and early != 0:
+            # A relay that dies immediately did not deliver anything: say so, keep the
+            # message queued, and do not spend the target's send budget on it.
+            defer(sid, text_file, note, f"relay failed (exit {early})")
+            print(f"relay FAILED (exit {early}) — {sid} did not receive this message; "
+                  f"queued in state/deferred-sends.jsonl.\n{log_tail(log)}")
+            return 2
     run_py([os.path.join(WATCH, "bin", "guard.py"), "record", sid, note or "send.py"])
     resolve_deferral(sid, text_file)
-    print(f"sent to {sid} (cwd kept = {cwd}); log {log}")
+    progress = "" if wait else " (delivery running in the background)"
+    print(f"sent to {sid} (cwd kept = {cwd}){progress}; log {log}")
     return 0
 
 
