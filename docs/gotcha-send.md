@@ -114,3 +114,27 @@
   两条用例钉在 `bin/selftest_send.py`（已证伪：把剥离逻辑去掉，第一条立刻红）。
 - **写正文时的习惯**：要对方动手就**别用"不用再…"开头**；若已经写了，闸会拦，改一句话重发即可——
   被拒是零副作用，正文文件还在。
+
+### A23 `sent` 打印出来不等于送达：中继本身也会失败，而它失败在"已清队列"之后
+- **症状**：`send.py` 打印 `sent to <sid> (cwd kept = …); log …`、`guard: OK`、待补发行也被删掉，
+  但目标会话**从没收到消息**——用户发现并问「那个会话没有收到你发送的消息」。
+- **成因（两层，各自独立）**：中继当时是一条 bash 一行命令
+  `bash -c "timeout 1800 <future> run --session <sid> --cwd \"…\" \"$(cat <file>)\""`。
+  1. 这台机器的 Git Bash 里 `/usr/bin/timeout` **Permission denied**（`exit:126`），`future run` 从未启动；
+  2. 更早一次，`--cwd` 经过 `json.dumps` 再进 bash 双引号，反斜杠被吃掉两次，变成
+     `C:Usersunmer.futurebinfuture.EXE`（`exit:127`）。
+  两次都是在 `main()` 已打印 `sent`、已 `guard record`、已 `resolve_deferral` **之后**才失败，
+  所以屏幕、guard 计数、待补发队列三者都显示"已送达"。
+- **判据：不要相信 `sent`，去看日志的 `exit:` 行**。
+  `grep -o 'exit:[0-9]*' logs/send-<sid>-*.log`：只有 `exit:0` 才是成功；
+  `126`＝命令不可执行、`127`＝找不到可执行文件/参数被 shell 改坏、`124`＝超时被杀。
+  **日志文件存在 ≠ 有内容**：失败时可能只有一两行。
+- **对策（已做）**：`bin/send.py` 新增 `deliver()`，用**参数列表**启动
+  `future run`（不经 shell，超时交给 `subprocess.run(timeout=)`），
+  并把子进程**分离**（Windows 用 `DETACHED_PROCESS`，`start_new_session` 在这里被静默忽略）；
+  `spawn_delivery()` 会在几秒内回读子进程状态：**立即失败就返回 2**，
+  这时**不记 guard、不删待补发**，把消息重新排队并打印日志尾部。
+  `bin/selftest_send.py` 新增两条用例（正常投递 exit 0 / 启动即失败 exit 2 且消息进队列）。
+- **通用教训**：任何"发出去"的动作都要有一条**来自对方或传输层**的证据
+  （日志 exit 码、目标会话 `Queries` 从 1 变 2、`isStreaming` 转 true），
+  不能只看自己打印的那一行。
