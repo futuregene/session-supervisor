@@ -5,8 +5,12 @@
   guard.py record <sessionId> [note]
   guard.py show [sessionId]
 
-Limits come from bin/config.json (defaults: 1 message per session per 4h,
-3 per session per day, 3 sessions touched per turn).
+Limits come from bin/config.json. The *burst* limit — 3 sessions touched per
+10-minute window — is what stops a runaway loop; the per-session 4h/day counts
+are for "do not keep nagging one conversation", and those were loosened to
+8 per 4h and 24 per day (2026-10-21: a session the user was driving himself
+needed a fifth message in a 4h window, and the send had to sit in the deferred
+queue until the window rolled). Falling back to `DEFAULTS` still errs strict.
 """
 import json
 import os
@@ -22,8 +26,8 @@ WATCH = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CFG_PATH = config_path()
 SENT = os.path.join(WATCH, "state", "sent.jsonl")
 
-DEFAULTS = {"max_messages_per_session_4h": 1,
-            "max_messages_per_session_day": 3,
+DEFAULTS = {"max_messages_per_session_4h": 4,
+            "max_messages_per_session_day": 12,
             "max_messages_per_turn": 3,
             "count_as_turn_window_seconds": 600}
 
