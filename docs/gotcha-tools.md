@@ -235,3 +235,19 @@
    ```
    **每一次写入都会留一个 revision 行**，所以被覆盖的版本能从库里原样取回——这是补救的唯一依靠，
    也是这条规定值得写成流程的原因。
+
+### D31 `make install` 会把**正在用的** `~/.future/bin/future.exe` 改名拿走
+
+- **成因**：`make install` 先 `future.exe` → `future.exe.old-<stamp>`、再复制新构建。于是整个安装窗口内
+  `~/.future/bin/future.exe` **不存在**；而构建失败（Windows 上 release 版 `future-host` 常见
+  `exit code: 0xc0000142, STATUS_DLL_INIT_FAILED`，即内存不足导致的进程创建失败）时，**它会一直不存在**。
+- **后果不是只有 CLI 没了**：本设施所有 shell 出去调 `future` 的脚本同时失效——`send.py`（`FUTURE` 常量）、
+  `scan.py`、`peek.py`、`inbox.py` 的会话查询。表现是 `send.py` 打出
+  `relay could not start (FileNotFoundError: [WinError 2])`、exit 127，消息进 `state/deferred-sends.jsonl`。
+- **判据**：`Get-ChildItem $env:USERPROFILE\.future\bin -Force` 里只剩 `future.exe.old-*` 就是这种情况；
+  再 `(Get-Process cargo,rustc -ErrorAction SilentlyContinue).Count` 看构建是否仍在跑。
+- **处理**：**构建还在跑就不要抢**（会与安装的复制步骤相撞）。等它结束：
+  `target\release\future.exe` 在 → 安装会自己复制好；构建失败 → 从
+  `future.exe.old-<stamp>` 或 `target\release\future.exe` 复制回 `future.exe`（与 `.old` 同尺寸即可确认是同一版）。
+  队列里的消息下一轮自动补发，不用手工搬。
+- **为什么记**：这条会让"消息没送到"看起来像发送器的 bug，实际是安装窗口；不写下来，下一次还会往会话 id 上找原因。

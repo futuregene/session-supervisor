@@ -510,6 +510,19 @@ def deliver(log, timeout, sid, cwd, framed_file):
         except subprocess.TimeoutExpired:
             fh.write(f"relay timed out after {timeout}s\n")
             rc = 124
+        except FileNotFoundError as exc:
+            # The one failure whose cause is never in the message: a `make install`
+            # renames the live binaries to `.old-<stamp>` and copies the new build
+            # in afterwards, so for the whole install — and permanently, if the
+            # build fails — the path below is simply absent. Plain "No such file or
+            # directory" sends the reader looking at the session id instead.
+            hint = ""
+            if not os.path.exists(FUTURE):
+                hint = (f" {FUTURE} does not exist: a `make install` may be running, "
+                        f"or one may have failed after renaming the old binary. "
+                        f"Recover from {FUTURE}.old-* or target/release/future.exe.")
+            fh.write(f"relay could not start ({type(exc).__name__}: {exc}){hint}\n")
+            rc = 127
         except Exception as exc:  # noqa: BLE001 — the log is the only witness
             fh.write(f"relay could not start ({type(exc).__name__}: {exc})\n")
             rc = 127
