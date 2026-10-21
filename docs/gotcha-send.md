@@ -135,6 +135,15 @@
   `spawn_delivery()` 会在几秒内回读子进程状态：**立即失败就返回 2**，
   这时**不记 guard、不删待补发**，把消息重新排队并打印日志尾部。
   `bin/selftest_send.py` 新增两条用例（正常投递 exit 0 / 启动即失败 exit 2 且消息进队列）。
+- **反过来也不成立**：`exit` 非 0 不等于没送达。重发时遇到过一次
+  `Error: Event stream timed out waiting for an event` + `exit:1`，而目标会话里
+  **已经有那条消息、`Queries` 也从 1 变 2**（run 在服务端继续跑，只是发起端的 SSE 流先断了）。
+  所以判据的层次是：
+  1. **最硬的证据＝目标会话的 transcript 里出现你发的那段文字**
+     （`python3 bin/peek.py <sid> --grep "<正文里的特征串>"`，命中即送达）；
+  2. 其次是目标会话的 `Queries` 从 n 变 n+1 且 `activeRun.state=running`；
+  3. 日志 `exit:0` 只说明**发起端的客户端**正常收尾，`exit:126/127` 说明它根本没启动；
+     两者都不是"对方收到了"的直接证据。
 - **通用教训**：任何"发出去"的动作都要有一条**来自对方或传输层**的证据
   （日志 exit 码、目标会话 `Queries` 从 1 变 2、`isStreaming` 转 true），
   不能只看自己打印的那一行。
