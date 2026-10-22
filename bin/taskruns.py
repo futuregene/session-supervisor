@@ -281,6 +281,38 @@ def collect(cfg=None, state=None, now_ms=None, force=False, fetch=True):
     return events, st
 
 
+def cmd_reviewed(rest, cfg, state=None, tasks=None, why="", now_ms=None, say=print):
+    """`reviewed <task>` — reset the review counter for *that* task.
+
+    An unknown target is an error, not a new task. The CLI used to fall back to
+    the raw argument, so a mistyped or truncated id silently created a task
+    record of its own: `reviewed` printed "counter reset" while the real task
+    stayed at six unreviewed runs and asked again an hour later. A bookkeeping
+    command that reports success for a target it never found is worse than one
+    that refuses — the refusal costs a retry, the false success costs another
+    full review cycle.
+    """
+    if not rest:
+        say(__doc__)
+        return 2
+    if tasks is None:
+        tasks, why = fetch_tasks(cfg)
+    if why:
+        say(why)
+        return 1
+    target = rest[0]
+    task = next((t for t in tasks if target in (t.get("id"), t.get("name"))), None)
+    if task is None:
+        known = ", ".join(f"{t.get('id')} ({t.get('name')})" for t in tasks) or "(none)"
+        say(f"no task matching {target!r}; reviewed needs a real task id or name.\n"
+            f"known tasks: {known}")
+        return 1
+    tid = task["id"]
+    mark_reviewed(tid, state=state, now_ms=now_ms)
+    say(f"reviewed: {tid} (counter reset)")
+    return 0
+
+
 def mark_reviewed(task_id, state=None, now_ms=None):
     st = state if state is not None else load_json(STATE_PATH, {})
     now_ms = int(now_ms if now_ms is not None else time.time() * 1000)
@@ -481,19 +513,7 @@ def main(argv):
         digest(rest[0], cfg, runs_n=n, out=out, do_print="--print" in rest)
         return 0
     if cmd == "reviewed":
-        if not rest:
-            print(__doc__)
-            return 2
-        tasks, why = fetch_tasks(cfg)
-        if why:
-            print(why)
-            return 1
-        target = rest[0]
-        task = next((t for t in tasks if target in (t.get("id"), t.get("name"))), None)
-        tid = task["id"] if task else target
-        mark_reviewed(tid)
-        print(f"reviewed: {tid} (counter reset)")
-        return 0
+        return cmd_reviewed(rest, cfg)
     print(__doc__)
     return 2
 

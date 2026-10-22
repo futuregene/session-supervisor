@@ -39,6 +39,13 @@ python3 bin/taskruns.py digest <任务id|名称>  # 写一份复盘摘录，打�
 python3 bin/taskruns.py reviewed <任务id>     # 关掉这一轮：计数归零、reviewPending 清除
 ```
 
+`reviewed` **只认真实的任务 id 或名称**，找不到就报错并列出已知任务（退出码 1，不写任何状态）。
+它以前会把参数原样当成 id 落一条记录：传错一个 id 时屏幕照样打印 "counter reset"，
+真任务的计数却还停在 6 轮、一小时后再次要求复盘。记账命令对"没找到的目标"报成功，
+比拒绝更贵——拒绝只花一次重试，假成功要付一整轮复盘。
+（事件 id `evt_task_review_tsk<32位>` 里的 `tsk<32位>` 不是任务 id，别把它的尾巴当参数：
+任务 id 形如 `tsk_<32 位>`，中间有下划线。）
+
 `digest` 落在 `state/task-digests/<task-id>.md`，只读、覆盖同一文件。它替你做的是**机械筛选**：
 
 - 运行表（状态 / 提示词版本 / 用时 / 输出字数）与异常块；

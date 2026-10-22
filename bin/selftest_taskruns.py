@@ -189,6 +189,34 @@ def main() -> int:
     decide_src = (ROOT / "bin" / "decide.py").read_text(encoding="utf-8")
     check("a medium task event can wake a turn", '"medium"' in decide_src.split("NOTIFY_PRIORITY", 1)[1][:80])
 
+    # 12. `reviewed` must refuse an unknown target instead of inventing one. The
+    # CLI used to fall back to the raw argument, so a truncated id (I passed an
+    # event id's tail once) created a task record of its own: it printed
+    # "counter reset" while the real task stayed at six unreviewed runs and asked
+    # again an hour later. Refusing costs a retry; a false success costs a whole
+    # extra review cycle.
+    st5 = {"tasks": {"tsk_demo": {"runsSinceReview": 6, "reviewPending": True}}}
+    tasks5 = [{"id": "tsk_demo", "name": "演示任务"}]
+    said: list[str] = []
+    rc_bad = mod.cmd_reviewed(["tsk_demoXXXX"], {"task_review_every_runs": 6},
+                              state=st5, tasks=tasks5, say=said.append)
+    check("reviewed refuses an unknown target", rc_bad == 1, f"rc={rc_bad}")
+    check("an unknown target creates no task record",
+          list(st5["tasks"]) == ["tsk_demo"], f"{list(st5['tasks'])}")
+    check("the refusal still leaves the real counter alone",
+          st5["tasks"]["tsk_demo"]["runsSinceReview"] == 6,
+          f"{st5['tasks']['tsk_demo']['runsSinceReview']}")
+    check("the refusal names the known tasks", "tsk_demo" in (said[-1] if said else ""),
+          f"{said[-1:]}")
+    rc_ok = mod.cmd_reviewed(["tsk_demo"], {"task_review_every_runs": 6},
+                             state=st5, tasks=tasks5, say=said.append)
+    check("reviewed resets a real task", rc_ok == 0 and
+          st5["tasks"]["tsk_demo"]["runsSinceReview"] == 0,
+          f"rc={rc_ok} n={st5['tasks']['tsk_demo']['runsSinceReview']}")
+    rc_name = mod.cmd_reviewed(["演示任务"], {"task_review_every_runs": 6},
+                               state=st5, tasks=tasks5, say=said.append)
+    check("reviewed accepts the task name too", rc_name == 0, f"rc={rc_name}")
+
     print(f"\n{'ALL OK' if not FAILS else str(len(FAILS)) + ' FAILED'}")
     return 0 if not FAILS else 1
 
