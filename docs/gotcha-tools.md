@@ -236,18 +236,22 @@
    **每一次写入都会留一个 revision 行**，所以被覆盖的版本能从库里原样取回——这是补救的唯一依靠，
    也是这条规定值得写成流程的原因。
 
-### D31 `make install` 会把**正在用的** `~/.future/bin/future.exe` 改名拿走
+### D32 相邻字符串字面量会**静默拼接**：`"--note" "…"` 是一条参数，不是两条
+- **表现**：`future session approve <sid> <rid>` 永远返回 `unknown option: --noteauto-approved …`（rc=1），
+  而调用方照旧把这条请求记成「已批准」——于是**自动批准从上线起一次也没成功过**，账本却全是「→ approve」。
+  同一行里 `approved += 1` 写在 `if not dry:` 里、与 `rc2` 无关，失败因此没有出口。
+- **判据**：凡把参数列表写成多行、又在中间漏掉逗号的地方，`python3 -c "print([...])"` 打一次就看得见；
+  **更可靠的是给 argv 单独一个函数**（`approvals.py: approve_argv`）让自测钉住形状，
+  而不是靠读代码时眼睛不滑。
+- **配套规矩**：外部命令失败（`rc != 0`）时不要计作成功，也不要只写进「已批准」那种单面账本——
+  要么写 `failed` 并算进预算，要么重试，二者都不能悄悄吞掉。
+- 探针：`bin/selftest_deny.py` 的 `approve argv` 一条（19 个用例里的最后一个）。
 
-- **成因**：`make install` 先 `future.exe` → `future.exe.old-<stamp>`、再复制新构建。于是整个安装窗口内
-  `~/.future/bin/future.exe` **不存在**；而构建失败（Windows 上 release 版 `future-host` 常见
-  `exit code: 0xc0000142, STATUS_DLL_INIT_FAILED`，即内存不足导致的进程创建失败）时，**它会一直不存在**。
-- **后果不是只有 CLI 没了**：本设施所有 shell 出去调 `future` 的脚本同时失效——`send.py`（`FUTURE` 常量）、
-  `scan.py`、`peek.py`、`inbox.py` 的会话查询。表现是 `send.py` 打出
-  `relay could not start (FileNotFoundError: [WinError 2])`、exit 127，消息进 `state/deferred-sends.jsonl`。
-- **判据**：`Get-ChildItem $env:USERPROFILE\.future\bin -Force` 里只剩 `future.exe.old-*` 就是这种情况；
-  再 `(Get-Process cargo,rustc -ErrorAction SilentlyContinue).Count` 看构建是否仍在跑。
-- **处理**：**构建还在跑就不要抢**（会与安装的复制步骤相撞）。等它结束：
-  `target\release\future.exe` 在 → 安装会自己复制好；构建失败 → 从
-  `future.exe.old-<stamp>` 或 `target\release\future.exe` 复制回 `future.exe`（与 `.old` 同尺寸即可确认是同一版）。
-  队列里的消息下一轮自动补发，不用手工搬。
-- **为什么记**：这条会让"消息没送到"看起来像发送器的 bug，实际是安装窗口；不写下来，下一次还会往会话 id 上找原因。
+### D33 用户**正在现场驱动**的会话不要替他批准
+- **表现**：用户在某个会话里逐条试「哪些请求不该通过自动审批」，而总管那层的 yolo 自动批准
+  会把请求放行——既覆盖他刚点下的拒绝，又让被测对象失去意义。
+- **做法**：`state/approval-exclude.jsonl` 一行一条 `{"session": "…", "until": "<本地时间>"}`，
+  `approvals.py` 读到就跳过该会话（到期自动失效）。放 `state/` 而不放 `bin/config.json`：
+  它点名的是一台机器上的某次会话，不该进 git。
+- **反例**：`bin/config.json: exclude_sessions` 只放**长期**排除（例如总管自己）。
+

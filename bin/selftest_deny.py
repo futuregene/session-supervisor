@@ -46,7 +46,19 @@ def main():
         if got != want:
             bad += 1
         print(f"  {'ok      ' if got == want else 'MISMATCH'} 拦截={got} 期望={want} :: {cmd}")
-    print(f"cases={len(CASES)} mismatches={bad}")
+
+    # The argv that approves a parked request. A missing comma once turned
+    # `--note <text>` into `--note<text>`, which the CLI rejects as an unknown
+    # option, so every auto-approval failed while the ledger claimed success.
+    argv = m.approve_argv("sid", 42)
+    want = ["session", "approve", "sid", "42", "--note", m.APPROVE_NOTE]
+    jargon = [a for a in argv if a.startswith("--note") and a != "--note"]
+    ok = argv == want and not jargon
+    if not ok:
+        bad += 1
+    print(f"  {'ok      ' if ok else 'MISMATCH'} approve argv :: {argv}")
+
+    print(f"cases={len(CASES) + 1} mismatches={bad}")
     return 1 if bad else 0
 
 

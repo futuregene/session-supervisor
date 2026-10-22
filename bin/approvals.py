@@ -22,6 +22,44 @@ WATCH = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CFG_PATH = config_path()
 LEDGER = os.path.join(WATCH, "state", "approvals.jsonl")
 REPORT = os.path.join(WATCH, "reports", "approvals.md")
+# Session ids the supervisor must keep its hands off, local and expiring
+# (`{"session": "…", "until": "<local ISO>"}` per line). A user may be measuring
+# what auto-approval does in a session they are driving live; approving there
+# would answer the very question under test and override a click they just made.
+# Lives under state/ on purpose: it names one machine's sessions, so it must not
+# enter git (`bin/config.json: exclude_sessions` stays for permanent exclusions).
+EXCLUDE = os.path.join(WATCH, "state", "approval-exclude.jsonl")
+
+
+def kept_away(now=None):
+    now = time.time() if now is None else now
+    ids = set()
+    try:
+        with open(EXCLUDE, "r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except Exception:
+                    ids.add(line)
+                    continue
+                if isinstance(row, str):
+                    ids.add(row)
+                    continue
+                until = row.get("until")
+                if until:
+                    try:
+                        if time.mktime(time.strptime(until[:19], "%Y-%m-%dT%H:%M:%S")) <= now:
+                            continue
+                    except Exception:
+                        pass
+                if row.get("session"):
+                    ids.add(row["session"])
+    except FileNotFoundError:
+        pass
+    return ids
 
 
 def cfg():
@@ -76,6 +114,21 @@ DENY_PATTERNS = [
 ]
 DENY_RE = re.compile("|".join(DENY_PATTERNS), re.IGNORECASE)
 
+APPROVE_NOTE = "auto-approved by session supervisor (user yolo authorization)"
+
+
+def approve_argv(session_id, request_id):
+    """The argv that lets one parked request run.
+
+    Kept in one function because this is where auto-approval silently died for a
+    long time: `"--note" "auto-approved …"` is one Python string (adjacent literals
+    concatenate), so the CLI was handed `--noteauto-approved …` and answered
+    "unknown option", rc=1, for every request. The caller counted the request as
+    approved anyway, so the ledger said "→ approve" while nothing ever ran.
+    `bin/selftest_deny.py` now pins this shape.
+    """
+    return ["session", "approve", str(session_id), str(request_id), "--note", APPROVE_NOTE]
+
 def main(argv):
     cmd = argv[0] if argv else "list"
     c = cfg()
@@ -121,10 +174,11 @@ def main(argv):
         print("agent unreachable; nothing approved")
         return 1
     approved, seen = 0, 0
+    away = kept_away()
     for s in json.loads(o).get("sessions", []):
         if approved >= budget:
             break
-        if s.get("id") in (c.get("exclude_sessions") or []):
+        if s.get("id") in (c.get("exclude_sessions") or []) or s.get("id") in away:
             continue
         rc, a, _ = future(["session", "approvals", s["id"], "--json"])
         if rc != 0:
@@ -159,11 +213,13 @@ def main(argv):
                    "tool": tool, "detail": json.dumps(req, ensure_ascii=False)[:600],
                    "action": "approve" if not dry else "dry-run"}
             if not dry:
-                rc2, o2, e2 = future(["session", "approve", s["id"], str(rid),
-                                      "--note" "auto-approved by session supervisor (user yolo authorization)"])
+                rc2, o2, e2 = future(approve_argv(s["id"], rid))
                 rec["rc"] = rc2
                 rec["result"] = (o2 or e2).strip()[:200]
-                approved += 1
+                if rc2 == 0:
+                    approved += 1
+                else:
+                    rec["action"] = "failed"
             os.makedirs(os.path.dirname(LEDGER), exist_ok=True)
             with open(LEDGER, "a", encoding="utf-8") as fh:
                 fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
