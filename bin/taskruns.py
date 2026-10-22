@@ -265,16 +265,38 @@ def collect(cfg=None, state=None, now_ms=None, force=False, fetch=True):
             rec["reviewPending"] = True
             rec["reviewEmittedRuns"] = runs_since
             fails = sum(1 for r in runs[:runs_since] if (r.get("status") or "") in FAIL_STATUSES)
+            stale_hours = int((now_ms - int(rec.get("lastReviewMs") or now_ms)) // 3600_000)
+            # Say *why* this review is due. The summary used to report only the run
+            # count, so a staleness/two-failure prompt read "已有 1 次运行未复盘" —
+            # which looks like the counter is broken and hides the real reason (one
+            # batch of six tasks fired at once on the 24h stale rule).
+            if runs_since >= every:
+                why_review = f"已有 {runs_since} 次运行未复盘"
+            elif int(rec.get("failureStreak") or 0) >= 2:
+                why_review = f"连续 {int(rec.get('failureStreak') or 0)} 次运行失败"
+            else:
+                why_review = f"已 {stale_hours} 小时未复盘（期间 {runs_since} 次运行）"
+            # The digest is regenerated here, with the ledger and state this poll
+            # already holds, so the path the event points at is current. It used to
+            # be whatever the *previous* review left behind: six events just handed
+            # out 24-hour-old digests, i.e. exactly the data that had already been
+            # reviewed, and reading them would have re-reviewed old runs.
+            digest_path = os.path.join(DIGEST_DIR, f"{tid}.md")
+            try:
+                digest(tid, cfg, out=digest_path, task=t, runs=runs, state=st,
+                       say=lambda *_: None)
+            except Exception as e:  # noqa: BLE001 — never block the event on this
+                print(f"taskruns: digest for {tid} failed: {e}", file=sys.stderr)
             events.append({
                 "id": event_id("task_review", f"{tid}_{runs_since}_{int(now_ms // 3600_000)}"),
                 "kind": "task_review", "priority": "medium",
                 "sessionId": "", "sessionName": (t.get("name") or "")[:80],
-                "summary": f"定时任务『{(t.get('name') or '')[:24]}』已有 {runs_since} 次运行未复盘"
+                "summary": f"定时任务『{(t.get('name') or '')[:24]}』{why_review}"
                            + (f"（其中 {fails} 次失败）" if fails else ""),
                 "detail": {"taskId": tid, "taskName": t.get("name"),
                            "runsSinceReview": runs_since, "failedRuns": fails,
-                           "trigger": t.get("trigger"),
-                           "digest": os.path.join(DIGEST_DIR, f"{tid}.md")},
+                           "trigger": t.get("trigger"), "dueReason": why_review,
+                           "digest": digest_path},
                 "detectedAtMs": now_ms,
             })
     st["lastPollMs"] = now_ms
@@ -347,20 +369,30 @@ def repeated_lines(bodies, min_runs=3):
     return sorted(((n, ln) for ln, n in counts.items() if n >= need), reverse=True)
 
 
-def digest(task_ref, cfg=None, runs_n=None, out=None, do_print=False):
+def digest(task_ref, cfg=None, runs_n=None, out=None, do_print=False,
+           task=None, runs=None, state=None, say=print):
+    """Write one review-able digest for `task_ref`; return its path.
+
+    `task` / `runs` / `state` let a caller that already holds them (see `collect`)
+    skip the extra `future task list` / `task runs` round-trips; without them the
+    digest fetches its own. `say` is how the path or text leaves this function, so
+    a background collector can stay silent (it used to print the path).
+    """
     cfg = cfg if cfg is not None else load_json(CFG_PATH, {})
-    st = load_json(STATE_PATH, {})
-    tasks, why = fetch_tasks(cfg)
-    if why:
-        raise SystemExit(why)
-    task = next((t for t in tasks
-                 if task_ref in (t.get("id"), t.get("name"))), None)
-    if not task:
-        raise SystemExit(f"no task matching {task_ref!r}")
+    st = state if state is not None else load_json(STATE_PATH, {})
+    if task is None:
+        tasks, why = fetch_tasks(cfg)
+        if why:
+            raise SystemExit(why)
+        task = next((t for t in tasks
+                     if task_ref in (t.get("id"), t.get("name"))), None)
+        if not task:
+            raise SystemExit(f"no task matching {task_ref!r}")
     tid = task["id"]
     rec = (st.get("tasks") or {}).get(tid) or {}
     n = int(runs_n or max(int(rec.get("runsSinceReview") or 0), 6))
-    runs = fetch_runs(cfg, tid, limit=min(max(n, 6), 30))
+    if runs is None:
+        runs = fetch_runs(cfg, tid, limit=min(max(n, 6), 30))
     rc, out_s, _ = future(cfg, ["task", "show", tid, "--json"])
     prompt, pver = "", None
     if rc == 0:
@@ -456,9 +488,9 @@ def digest(task_ref, cfg=None, runs_n=None, out=None, do_print=False):
         fh.write(text)
     os.replace(tmp, path)
     if do_print:
-        print(text)
+        say(text)
     else:
-        print(path)
+        say(path)
     return path
 
 

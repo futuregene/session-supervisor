@@ -217,6 +217,54 @@ def main() -> int:
                                state=st5, tasks=tasks5, say=said.append)
     check("reviewed accepts the task name too", rc_name == 0, f"rc={rc_name}")
 
+    # 13. the digest an event hands out must be current, and the summary must say
+    # why the review is due. Both were wrong in the same way: they reported the
+    # *previous* review's leftovers. Six stale events once pointed at digests that
+    # were 24h old (the runs already reviewed), and every staleness prompt read
+    # "已有 1 次运行未复盘" — a wording that looks like a broken counter.
+    mod.future = lambda _cfg, _args, timeout=30: (
+        0, _json.dumps({"task": dict(T, prompt="x" * 100, promptVersion=9)}), "")
+    st7 = {}
+    led7 = [run("e1")]
+    mod.fetch_runs = lambda _cfg, _tid, limit=20: list(reversed(led7))
+    mod.collect({"task_review_every_runs": 2, "task_poll_seconds": 0}, state=st7,
+                now_ms=50_000, force=True, fetch=True)  # baseline
+    stale_digest = pathlib.Path(mod.DIGEST_DIR) / "tsk_demo.md"
+    stale_digest.parent.mkdir(parents=True, exist_ok=True)
+    stale_digest.write_text("# STALE — last review's digest\n", encoding="utf-8")
+    led7 += [run("e2"), run("e3")]
+    ev7, st7 = mod.collect({"task_review_every_runs": 2, "task_poll_seconds": 0},
+                           state=st7, now_ms=51_000, force=True, fetch=True)
+    rev7 = [e for e in ev7 if e["kind"] == "task_review"]
+    body7 = stale_digest.read_text(encoding="utf-8") if stale_digest.exists() else ""
+    check("an emitted review rewrites the digest it points at",
+          "STALE" not in body7 and "定时任务复盘" in body7, f"{body7[:60]!r}")
+    check("the rewritten digest reflects the current prompt version", "v9" in body7,
+          f"{body7[:200]!r}")
+    check("the event points at the digest that was just written",
+          rev7 and rev7[0]["detail"].get("digest") == str(stale_digest),
+          f"{rev7 and rev7[0]['detail'].get('digest')}")
+
+    # 13b. a staleness prompt names the hours, not a bare run count
+    st8 = {"tasks": {"tsk_demo": {"name": "演示任务", "seenRunIds": ["f1"],
+                                  "runsSinceReview": 0,
+                                  "lastReviewMs": 60_000 - 26 * 3600_000,
+                                  "failureStreak": 0, "reviewPending": False,
+                                  "reviewEmittedRuns": 0}}}
+    led8 = [run("f1", ver=9), run("f2", ver=9)]
+    mod.fetch_runs = lambda _cfg, _tid, limit=20: list(reversed(led8))
+    ev8, st8 = mod.collect({"task_review_every_runs": 6, "task_review_max_hours": 24,
+                            "task_poll_seconds": 0}, state=st8, now_ms=60_000,
+                           force=True, fetch=True)
+    rev8 = [e for e in ev8 if e["kind"] == "task_review"]
+    check("a stale review says how long it has been", rev8 and "小时未复盘" in rev8[0]["summary"],
+          f"{rev8 and rev8[0]['summary']}")
+    check("a stale review does not pretend six runs piled up",
+          rev8 and "6 次运行" not in rev8[0]["summary"], f"{rev8 and rev8[0]['summary']}")
+    check("the event carries the reason it is due",
+          rev8 and "小时未复盘" in (rev8[0]["detail"].get("dueReason") or ""),
+          f"{rev8 and rev8[0]['detail'].get('dueReason')}")
+
     print(f"\n{'ALL OK' if not FAILS else str(len(FAILS)) + ' FAILED'}")
     return 0 if not FAILS else 1
 
