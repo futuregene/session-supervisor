@@ -43,3 +43,24 @@
   （`state.rs` 的 `is_terminal` 是 `matches!(status, Done | Superseded)` 的合取）。所以"标 blocked 就算收尾"
   在控制平面里不成立——要让目标真正 `terminal: true`，未做的票只能以 `superseded` 退役、
   并在理由里写明"NOT DONE"，不许标 done 充数。
+
+### G5 goal 台账是**项目本地**的：删掉 worktree 等于删掉那批目标的全部历史
+
+- **机制**：`future goal` 的台账（`registry.json`、`goals/<id>/`、`runs/`）写在**其项目根的 `.future/goal/`**，
+  而 worktree 是一个独立根——所以在 `.worktrees/<任务>/` 里 `goal init` 的目标，台账只存在于那棵 worktree 里。
+  `git worktree remove` 之后，`future goal status --goal <id>` 只会答 `goal <id> not found`，
+  而且**没有任何命令能把它找回来**：分支没推远端时，连裁决文件与终报都一起消失。
+- **症状形态**：一个跑了几天的长目标，某天问"这个目标花了多少、结论是什么"，
+  台账已经不在了；能拿到的只有当时抄出来的副本（如果有）。
+- **判据**：**报出"目标 X 的最终数字/结论"之前，先确认它的台账还活着**：
+  ```bash
+  future goal status --goal <id>        # not found ⇒ 你手上只有副本，要声明证据等级
+  cat <项目根>/.future/goal/registry.json | grep <id>
+  ```
+  台账不在时，报告里必须写明"这些数字来自 <某次读数的副本>，现在无法复核"——**不要说成当前事实**。
+- **防止**（对长目标）：在 worktree 里跑目标时，定期把台账与终报复制到项目根或仓库外的持久目录
+  （`.future/` 在多数仓库里被 gitignore，但那不等于持久——它随 worktree 一起走）。
+- **清理的前提**：`git worktree remove` 之前问一句"这棵树里有没有 goal 台账"。有台账就先备份；
+  这跟"分支上有未推送提交不能删"是同一类判断。
+- **反向症状**：项目根 `registry.json` 里可能还留着 `status: active`、但 `cwd` 指向已删除 worktree 的目标。
+  这类残留不会自己消失，读 `registry.json` 时要按 `cwd` 是否存在过滤一遍，别当成"还在跑"。
