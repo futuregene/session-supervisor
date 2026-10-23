@@ -41,7 +41,18 @@ def _bin_dirs() -> list[str]:
     explicit = os.environ.get("FUTURE_TOOLBIN")
     if explicit:
         dirs.append(explicit)
-    dirs += ["/opt/homebrew/bin", "/usr/local/bin", os.path.expanduser("~/.local/bin")]
+    dirs += [
+        "/opt/homebrew/bin",
+        "/usr/local/bin",
+        os.path.expanduser("~/.local/bin"),
+        # Windows has no /usr/local: the installer puts both binaries in
+        # `~/.future/bin` (2026-10-23). Without it the search falls through to
+        # PATH, where a checkout's `target/release` shadows the installed CLI
+        # and every call then drives a build the user never installed -- which
+        # also fails to handshake with the running Agent, so the whole
+        # supervisor stops working while the daemon (different PATH) is fine.
+        os.path.expanduser("~/.future/bin"),
+    ]
     return [d for d in dirs if d and os.path.isdir(d)]
 
 
@@ -88,8 +99,12 @@ def future_exe(preferred: str | None = None) -> str:
     if env and os.path.exists(env):
         return env
     for d in _bin_dirs():
-        p = os.path.join(d, "future")
-        if os.path.exists(p):
+        # `which(..., path=)` rather than `join(d, "future")`: on Windows the
+        # installed file is `future.exe`, and a literal join never matches it.
+        # That is exactly how the Windows install became invisible here while a
+        # checkout's `target/release` shadowed it through PATH (2026-10-23).
+        p = shutil.which("future", path=d)
+        if p:
             return p
     found = shutil.which("future")
     if found:
