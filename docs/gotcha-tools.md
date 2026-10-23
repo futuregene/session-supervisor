@@ -255,3 +255,21 @@
   它点名的是一台机器上的某次会话，不该进 git。
 - **反例**：`bin/config.json: exclude_sessions` 只放**长期**排除（例如总管自己）。
 
+### D-假红 报"仓库里有个既有的红"之前，先用 CI 用的工具链复现一次
+
+- **现象**：有人（或两个会话各一次）报告某文件在主干上 clippy 报错、说会让下一个 PR 的 lint job 变红，
+  其中一个准备开修复分支。用**仓库 pin 的那一版**工具链跑同一条命令，却是零告警。
+- **机制**：`cargo`/`clippy-driver` 会被包管理器装的版本遮蔽。更新的一版**不一定**报得更多——
+  旧的 Homebrew 版可能报新版不报的 finding，而 CI 用的是 pin 的版本，于是"主干是红的"在 CI 里根本不成立。
+  这类误报的代价不是白干一次：**会有人为不存在的问题改主干**；反过来，真红若被当成"上次也报了"的噪音就会被忽略。
+  两侧都贵。
+- **判据**：任何"xx 在主干上是红的"的结论，必须在 **CI 用同一个工具链**下复现过才成立。
+  ```bash
+  # 版本号以仓库的 rust-toolchain / CI 配置为准，别凭记忆写
+  export PATH="$HOME/.rustup/toolchains/<pin>-$ARCH-apple-darwin/bin:$PATH"
+  which cargo clippy-driver            # 确认没落到 /opt/homebrew 或 /usr/local
+  cargo clippy -p <crate> --all-targets --no-deps -- -D warnings
+  ```
+  `--no-deps` 只编这一个 crate，几秒到几十秒；`--all-targets` 必须带上，CI 跑的就是它。
+- **附**：报红时把命令、工具链版本、`Finished`／告警原文一起贴出来；只说"我这边 clippy 报错"，
+  接收方无法判断是真红还是版本差。
