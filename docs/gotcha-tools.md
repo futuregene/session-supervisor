@@ -273,3 +273,20 @@
   `--no-deps` 只编这一个 crate，几秒到几十秒；`--all-targets` 必须带上，CI 跑的就是它。
 - **附**：报红时把命令、工具链版本、`Finished`／告警原文一起贴出来；只说"我这边 clippy 报错"，
   接收方无法判断是真红还是版本差。
+
+### D-app 探活 别用 System Events：它把 TCC 弹窗记到终端头上，而且"点了不允许"不会停
+
+- **症状**：用户的终端应用（Ghostty/iTerm/…）反复弹「"'X' 想要控制 'System Events'"」。点"不允许"，
+  下一轮换个会话还会再弹。用户以为是终端有问题。
+- **机制**：`osascript … tell application "System Events" …` 发的是 Apple Event，而 TCC 把**调用者**归因到
+  承载 shell 的终端应用，于是弹窗写的是终端名。拒绝只对**那一次**请求生效，调用方（agent 会话）并不知道自己被拒，
+  下次照样再问；而它要的答案（某个 app 是否在可见应用列表里）本来不需要 Apple Events。
+- **判据**：探活/枚举窗口用不需要授权的接口——`lsappinfo info -only bundleid <name>`、`CGWindowListCopyWindowInfo`、
+  或直接看进程表与 `open -Ra <app>` 的退出码。**只有确实要驱动 UI（点击/敲键/读控件）时才用 System Events**，
+  那时应当由用户当场授权，而不是让它在后台反复弹。
+- **别用 PATH 遮蔽去修**：把 `~/.local/bin/osascript` 放前面只会让"你自己那个工具 shell"里不弹；
+  用户的登录 shell 里 `which -a osascript` 仍先命中 `/usr/bin`（`~/.zshrc` 后面还会有若干行继续 prepend，
+  把先前的目录挤到后面）。**判据要写成 `zsh -lc 'which -a osascript'` 的第一行**，不是"我这边跑通了"。
+  往 PATH 里插一个遮蔽系统工具的 shim，还会影响所有脚本和用户自己的手动调用——代价大于收益。
+- **真正的修法在指令侧**：写给会话的话里不要出现"用 System Events 看可见应用列表"；改成 `lsappinfo` 或进程表。
+  一条会反复触发的弹窗，根因通常是**我们自己的措辞**，而不是用户机器上的某个开关。
