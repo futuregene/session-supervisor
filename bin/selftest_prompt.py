@@ -169,7 +169,17 @@ print("the real prompts")
 check("prompts/append.md exists", os.path.exists(os.path.join(ROOT, "prompts", "append.md")), True)
 check("prompts/turn.md exists", os.path.exists(os.path.join(ROOT, "prompts", "turn.md")), True)
 real = turn_prompt.compose(ROOT)
-check("real composition is non-empty", len(real) > 500, True)
+real_kind, _why = turn_prompt.mode(ROOT)
+# Regression (2026-10-22): this check hardcoded `len(real) > 500`, which only holds
+# for mode=full (manual + card). In mode=minimal the card alone is ~493 B, so it
+# failed on a correctly-installed minimal supervisor. Assert the real contract per
+# mode instead: the manual is in the message iff the append is verified live.
+check("real composition is non-empty", bool(real.strip()), True)
+if real_kind == "minimal":
+    check("minimal real message drops the manual", "peek.py" in real, False)
+else:
+    check("full real message carries the manual", "peek.py" in real, True)
+    check("full real message is larger than the card alone", len(real) > 500, True)
 manual = open(os.path.join(ROOT, "prompts", "append.md"), encoding="utf-8").read()
 check("real manual names the lock step", "lock.py acquire" in manual, True)
 check("real manual names peek.py", "peek.py" in manual, True)
