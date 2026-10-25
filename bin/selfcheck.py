@@ -245,6 +245,20 @@ def check_lock_selftest() -> tuple[bool, str]:
     return p.returncode == 0, (tail[-1] if tail else f"exit {p.returncode}")
 
 
+def check_dispatch_selftest() -> tuple[bool, str]:
+    """The registry that makes an opened session a tracked promise.
+
+    `bin/dispatch.py` exists because "open more sessions and follow up on all of
+    them" fails in the second half: an untracked session comes back later as an
+    ordinary `new_session` row and gets acked. Its selftest pins the three things the
+    wake card depends on — a row without an acceptance check is refused, a close
+    hides rather than rewrites, and pruning never resurrects a finished row.
+    """
+    p = run([sys.executable, os.path.join(ROOT, "bin", "dispatch.py"), "--selftest"])
+    tail = (p.stdout or "").strip().splitlines()
+    return p.returncode == 0, (tail[-1] if tail else f"exit {p.returncode}")
+
+
 def check_send_selftest() -> tuple[bool, str]:
     """The timing rule for relays: never send into a session that is mid-run.
 
@@ -655,6 +669,7 @@ CHECKS = [
     ("taskruns selftest", check_taskruns_selftest),
     ("balance-log selftest", check_balance_log_selftest),
     ("send selftest", check_send_selftest),
+    ("dispatch selftest", check_dispatch_selftest),
     ("roll selftest", check_roll_selftest),
     ("lock selftest", check_lock_selftest),
     ("prune selftest", check_prune_selftest),

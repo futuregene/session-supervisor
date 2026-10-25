@@ -443,6 +443,22 @@ def resolve_deferral(sid, text_file):
         pass
 
 
+def record_dispatch(sid, title, accept, repo, note):
+    """Append the dispatch row `--new` just created (see `bin/dispatch.py`).
+
+    Done through that module rather than by writing JSON here: it owns the row shape
+    and the `--accept` requirement, and it is the same file the wake card reads.
+    """
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import dispatch as dispatch_registry
+        dispatch_registry.add(sid, title, accept, repo, note)
+        print(f"tracking: {accept}")
+    except Exception as error:  # never fail a delivery over the bookkeeping
+        print(f"warning: could not record the dispatch ({error}); "
+              f"add it with `python3 bin/dispatch.py add --session {sid} --accept \"…\"`")
+
+
 def main_new(argv):
     """`--new --cwd <repo> [--name <title>] <text-file> [--note …]`: start, then send.
 
@@ -466,6 +482,17 @@ def main_new(argv):
         print(f"cannot create the new session: {why}")
         return 1
     print(f"created session {sid} in {repo_cwd}" + (f" \u300c{name}\u300d" if name else ""))
+    # Track it before the relay: a session opened here is one this supervisor owes a
+    # follow-up on, and the wake card is the only thing that reliably reaches a later
+    # turn (user, 2026-10-25: 「请你积极开更多会话……并跟进所有这些会话」). Recording it
+    # first means a relay that fails still leaves the row, which is the right way
+    # round — an untracked session is the loss, not an extra row.
+    accept = parse_opt(argv, "--accept")
+    if accept:
+        record_dispatch(sid, name or "", accept, repo_cwd, note or "")
+    else:
+        print("note: not tracked (no --accept) — nothing will re-check this session "
+              "on a later wake; pass --accept \"<what result closes it>\"")
     # From here it is an ordinary relay: the session is idle, has no relay history,
     # and is not a goal worker, so it goes through the same framing, guard
     # accounting and logging as any other message.

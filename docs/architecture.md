@@ -44,7 +44,8 @@ runbooks/supervisor-daemon.md）——只负责让下一行一直活着
 | `bin/inbox.py` | 事件台账：`list --brief/--json`、`count`、`ack`、`ack-all`、`fold` | `inbox/pending.jsonl` → `handled.jsonl` |
 | `bin/lock.py` | 单飞锁：`acquire` / `release` / `status`（归属于"回合"，非 PID） | `state/agent.lock` |
 | `bin/guard.py` | 防打转：`check <id>` / `record <id> "<note>"` / `show`。**口径以回读 transcript 为准**（`observed_sends()`），`state/sent.jsonl` 只是自己记的、会漏 | `state/sent.jsonl`、`state/observed_sends.json`（180s 缓存） |
-| `bin/send.py` | 唯一的转达通道：抬头、两道闸、额度、待补发队列 | `state/sent.jsonl`、`state/deferred-sends.jsonl` |
+| `bin/send.py` | 唯一的转达通道：抬头、两道闸、额度、待补发队列；`--new` 带 `--accept` 时自动登记派工 | `state/sent.jsonl`、`state/deferred-sends.jsonl`、`state/dispatch.jsonl` |
+| `bin/dispatch.py` | **我开的会话就是我的待办**：`add --session … --accept …` / `list` / `close` / `prune`。未关闭的行由 `bin/turn_prompt.py` 渲染进唤醒卡（含验收标准与开了多久） | `state/dispatch.jsonl` |
 | `bin/toolpath.py` | 统一发现 `future` / `python3` 可执行文件 | stdout |
 | `bin/taskruns.py` | 定时任务台账 → 事件：失败/空输出/该复盘了；`digest` 写复盘摘录 | `state/taskruns.json`、`state/task-digests/` |
 | `bin/selfcheck.py` | 全部静态探针（= PR 的 CI） | stdout |
@@ -90,6 +91,7 @@ Windows 编译错误上，后到的那个只能把先到者的提交再验一遍
 | `state/wakes.jsonl` | 每次唤醒的原因与当时待处理数 |
 | `state/sent.jsonl` | 总管发过消息的记账（guard 写入） |
 | `state/deferred-sends.jsonl` | 等待性拒发（mid-run / 无额度）的待补发队列 |
+| `state/dispatch.jsonl` | 我开的派工：未关闭的行=我欠的跟进，唤醒卡每轮重提（`bin/dispatch.py`） |
 | `state/approvals.jsonl` | 自动批准的逐条明细 |
 | `state/monitor_session.txt` | 总管会话 id（wake 目标；轮换后由 `monitor_roll.py` 改写） |
 | `state/agent.lock` | 单飞锁（易变，gitignore） |

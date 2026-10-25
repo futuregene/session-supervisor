@@ -220,6 +220,30 @@ def _pending_sends(watch=WATCH):
     return out
 
 
+def _open_dispatches(watch=WATCH):
+    """Sessions I opened and still owe a follow-up on (user, 2026-10-25).
+
+    「请你积极开更多会话，在多个会话中完成，并跟进所有这些会话」 — opening them was
+    never the gap; forgetting them was. A session I dispatched in an earlier wake
+    arrives later as an ordinary `new_session`/`awaiting_user` row, with nothing saying
+    it was mine, and gets acked. Rendering the open rows here puts the obligation back
+    in front of the only thing that reliably reaches a later turn.
+
+    The line carries `accept`, not just the id: without it, "is this done?" is a
+    judgement call at 3am, and the safe answer is to leave the row open forever.
+    """
+    try:
+        sys.path.insert(0, os.path.join(watch, "bin"))
+        import dispatch as registry
+    except Exception:
+        return []
+    try:
+        rows = registry.open_rows(os.path.join(watch, "state", "dispatch.jsonl"))
+    except Exception:
+        return []
+    return registry.render(rows) if rows else []
+
+
 def compose(watch=WATCH):
     kind, _why = mode(watch)
     with open(os.path.join(watch, "prompts", "turn.md"), "r", encoding="utf-8") as fh:
@@ -232,6 +256,16 @@ def compose(watch=WATCH):
     directives = _active_directives(watch)
     if directives:
         card += "\n\n## 用户一次性指令（48h 后自动失效）\n" + "\n".join(directives)
+    dispatches = _open_dispatches(watch)
+    if dispatches:
+        card += ("\n\n## 我在跟进的派工（" + str(len(dispatches)) + " 条 · 都是我自己开的会话）\n"
+                 + "\n".join(dispatches)
+                 + "\n\n> 每一条都要看一眼：`python3 bin/peek.py <id>`。做完了「验收」就"
+                   "`python3 bin/dispatch.py close <id> --why \"…\"`；没做完就继续推、"
+                   "不要把这一行当作只知悉。"
+                   "\n> 结束时还有后续、而且另开会话更合适（可拆、要探索、与原任务无关）"
+                   "——就**再开**：`python3 bin/send.py --new --cwd <仓> --name \"<功能>\" "
+                   "--accept \"<什么结果能关掉它>\" <工单文件>`，它会自己登记成新的一行。")
     header = f"<!-- supervisor-card mode={kind} -->\n"
     if kind == "minimal":
         body = header + card

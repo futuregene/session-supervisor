@@ -34,8 +34,12 @@
    > 走 worktree+PR+CI；**PR 与合并全程自动、不问用户**）。
    > 拿不准"要不要替他拿主意"时：**先查 `.private/profile/` 与 `bin/recall.py`，再决定答还是问**。
 4. **发消息**（**只在对方真要改变动作时才发**）— `python3 bin/send.py <SESSION_ID> <text-file> [--note "主题"] [--intent …]`。
-   **新功能就开新会话**——`python3 bin/send.py --new --cwd <仓> --name "<功能>" <text-file>`；
+   **新功能就开新会话**——`python3 bin/send.py --new --cwd <仓> --name "<功能>" --accept "<什么结果能关掉它>" <text-file>`；
    不要沿用该仓已有的会话（会把它的历史带进新工作，对方每轮为它付费且容易误读）。
+   **该拆就拆**：一件活收尾时还剩几件互不依赖的事，分到几个新会话并行做；要探索也用新会话。
+   带了 `--accept` 的会被自动登记进 `state/dispatch.jsonl`，卡片里「我在跟进的派工」那一段就是它——
+   每次都要 `bin/peek.py` 看、做完 `bin/dispatch.py close`，**不能只 ack**（用户 2026-10-25 原话：
+   「请你积极开更多会话……并跟进所有这些会话」）。
    它自己读对方 cwd 并传 `--cwd`、读不到就拒发、自动记护栏，并**替你加上规范的 Markdown 抬头**；
    **绝不手写 `future run`**。被护栏拦下（同一会话 4h 内条数上限，见 `bin/config.json`
    的 `max_messages_per_session_4h`；真正的防打转是"每 10 分钟最多碰 3 个会话"那条突发限制）时，
