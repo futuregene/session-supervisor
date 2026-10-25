@@ -90,6 +90,31 @@ gh pr checks <n> --watch --required      # 同步等检查，**不要** sleep �
 
 
 
+### 3.1 合并判据：check 必须**跑完**且为 pass，不是"看着是绿的"
+
+唯一可机械核验的判据：
+
+```bash
+gh pr checks <n> --json name,state,completedAt    # 要求 state=pass 且 completedAt 非空
+```
+
+`completedAt` 为空 = 检查还在跑 = **不许合并**。合并时把「check 完成时刻 / 合并时刻」两个时间戳
+一起记进 `journal/`，事后才分得清是"没跑"还是"跑了红但先合了"。
+
+- **为什么写死这一条**：实测有 PR 是在 CI 跑完**之前**被合并的——`mergedAt` 比 `completedAt`
+  早几十秒到几分钟，合并后 CI 才报红。当事人的说法是"合并时 CI 没抓住"，实际是**抢跑**。
+  这类 PR 进主干后，**任何基于主干的新分支跑本地检查都会红**，下一个人的 PR 被无端判红、
+  还要额外花一个 PR 去修格式。
+- **业务仓可能根本没有分支保护**：先查
+  `gh api repos/<owner>/<repo>/branches/main/protection`（404 = 未保护）与
+  `gh api repos/<owner>/<repo>/rulesets`（`[]` = 无规则集）。没有保护就意味着**没有任何机制会拦住抢跑**，
+  只能靠这一条自己卡；"能合并"绝不等于"该合并"（与 §3 末条 `enforce_admins=false` 同源）。
+- **代表用户给别的会话下指令时**，把这条判据原文写进指令里。只说"CI 绿了再合"，对方会用
+  "我推完看了一眼是绿的"来替代 `completedAt`，等于没约束。
+- **squash 合并会掩盖分支历史里的问题**：分支上曾经提交过的凭据形状串、格式违规，
+  在 squash 后的主干历史里不会出现。所以"分支历史有脏东西"不必靠强推重写（强推另需用户点头），
+  合并后在一份**新 clone** 上复核即可。
+
 ## 4. 合并后：清 worktree + 清分支 + 把 `main` 同步到最新
 
 
