@@ -21,6 +21,10 @@ PENDING_SEEN = os.path.join(WATCH, "state", "pending_seen.json")
 PAYLOAD = os.path.join(WATCH, "state", "turn_payload.json")
 MONITOR_FILE = os.path.join(WATCH, "state", "monitor_session.txt")
 LOG = os.path.join(WATCH, "logs", "decide.log")
+# The supervisor's single-flight lock (`bin/lock.py`). A wake while a turn still
+# holds it buys nothing: that turn's first instruction is `lock.py acquire ||
+# exit 0`, so it exits before it can act on an event. See `turn_in_flight`.
+LOCK_FILE = os.path.join(WATCH, "state", "agent.lock")
 NOTIFY_PRIORITY = {"high", "medium"}
 # What the monitor session is called. `monitor_roll.py` creates it with this name; the
 # desktop app's first-turn auto-title can overwrite it (see `name_heal_needed`).
@@ -159,10 +163,50 @@ def name_heal_needed(status, want, max_runs=1):
     return 0 < runs <= int(max_runs)
 
 
+def turn_in_flight(cfg):
+    """True when a supervisor turn holds a *fresh* lock (see `bin/lock.py`).
+
+    A woken turn whose predecessor still holds the lock does nothing: its first
+    instruction is `lock.py acquire || exit 0`, so it exits without touching an
+    event. It still costs a run, and a high-priority event re-arms the wake on
+    every cycle, so one long turn turns into a burst of purchases that each buy
+    nothing. Measured 2026-10-25: a turn took the lock at 08:36 and held it 63 min
+    while two `high` events stayed pending; the gate woke 15 more times in that
+    window, every one of them exiting at the acquire step.
+
+    Skipping the wake loses nothing: `pending.jsonl` is untouched, the scanner
+    runs every 30 s, and the first cycle after the lock is released (or after its
+    TTL expires, `lock_ttl_seconds`) wakes normally. So this debounces *only* the
+    overlap, which is what the lock already refuses to let through.
+
+    The lock is read from *this* facility's `state/`, not through `lock.py`'s
+    module constant, so a selftest that redirects `WATCH` to a temp dir is
+    self-contained instead of consulting the turn that happens to be running it.
+    """
+    path = LOCK_FILE
+    try:
+        entry = load_json(path, None)
+        if not isinstance(entry, dict):
+            return None
+        age = time.time() - float(entry.get("ts") or 0)
+        ttl = int(cfg.get("lock_ttl_seconds") or 0) or 900
+        if age < ttl:
+            who = entry.get("note") or entry.get("session") or entry.get("pid") or "?"
+            return f"{int(age)}s ago by {who} (ttl {ttl}s)"
+        return None
+    except Exception as exc:  # noqa: BLE001
+        log(f"lock check skipped ({type(exc).__name__}: {exc})")
+        return None
+
+
 def main():
     cfg = load_json(CFG_PATH, {})
     if os.path.exists(os.path.join(WATCH, "state", "PAUSE")):
         return 0  # one-switch circuit breaker
+    busy = turn_in_flight(cfg)
+    if busy:
+        log(f"a turn is already running (lock held {busy}); not waking")
+        return 0
     now = time.time()
     monitor = ""
     try:

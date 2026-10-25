@@ -114,6 +114,9 @@ def run_main(tmp, spawn, pending_rows=()):
         "PAYLOAD": os.path.join(tmp, "state", "turn_payload.json"),
         "MONITOR_FILE": os.path.join(tmp, "state", "monitor_session.txt"),
         "LOG": os.path.join(tmp, "logs", "decide.log"),
+        # No lock file in `tmp`: every case here is "no turn is running". The
+        # fresh-lock case has its own test.
+        "LOCK_FILE": os.path.join(tmp, "state", "agent.lock"),
         "CFG_PATH": os.path.join(tmp, "config.json"),
         "subprocess": fake_sub,
     }
@@ -165,6 +168,34 @@ with tempfile.TemporaryDirectory() as tmp:
           os.path.exists(os.path.join(tmp, "state", "pending_seen.json")), False)
     check("no wake is claimed in the ledger",
           os.path.exists(os.path.join(tmp, "state", "wakes.jsonl")), False)
+
+# The overlap regression (2026-10-25): a wake while another turn still holds the
+# lock buys nothing — the woken turn's first instruction is `lock.py acquire ||
+# exit 0`, so it exits before it can act. Measured: one turn held the lock 63 min
+# with two `high` events pending and the gate woke 15 more times, every one of
+# them exiting at the acquire step. Fresh lock → no spawn, and the news stays;
+# expired lock → the normal path.
+with tempfile.TemporaryDirectory() as tmp:
+    os.makedirs(os.path.join(tmp, "state"), exist_ok=True)
+    import time as _time
+    with open(os.path.join(tmp, "state", "agent.lock"), "w", encoding="utf-8") as fh:
+        json.dump({"pid": 1, "ts": _time.time(), "note": "a long turn"}, fh)
+    rc, calls = run_main(tmp, lambda argv, **kw: None, pending_rows=(
+        {"id": "ev_1", "kind": "run_error", "priority": "high", "sessionId": "s1",
+         "sessionName": "n", "summary": "s"},))
+    check("a held lock means no wake at all", len(calls), 0)
+    check("a held lock returns cleanly", rc, 0)
+    check("and the event is still pending (not weighed)",
+          os.path.exists(os.path.join(tmp, "state", "pending_seen.json")), False)
+
+with tempfile.TemporaryDirectory() as tmp:
+    os.makedirs(os.path.join(tmp, "state"), exist_ok=True)
+    import time as _time
+    # Older than the 900 s default TTL: a crashed turn's lock must not wedge the gate.
+    with open(os.path.join(tmp, "state", "agent.lock"), "w", encoding="utf-8") as fh:
+        json.dump({"pid": 1, "ts": _time.time() - 1000, "note": "a crashed turn"}, fh)
+    rc, calls = run_main(tmp, lambda argv, **kw: None)
+    check("an expired lock still wakes", len(calls), 1)
 
 print()
 if FAILED:
