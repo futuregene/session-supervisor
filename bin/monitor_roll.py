@@ -561,6 +561,16 @@ def reset_or_roll(current, reason, queries, marker, force_all=False, keep_last=0
         # (incident-6's `cannot append to a compacted settled run`). Dropping every
         # entry is still in place — the identity and its settings are untouched.
         selectors.append(["--all"])
+    # A reset deletes this session's `runs` rows (transcript.rs:187), so record
+    # what they cost before they go. Written to state/cost-ledger.jsonl, which
+    # `bin/cost.py` reads back; it never raises, so a ledger problem cannot block
+    # a reset the session needs to stay usable.
+    try:
+        sys.path.insert(0, os.path.join(WATCH, "bin"))
+        import cost as cost_mod
+        cost_mod.snapshot(current, reason)
+    except Exception:  # noqa: BLE001
+        pass
     rc, _out, err = 0, "", ""
     busy = False
     for selector in selectors:

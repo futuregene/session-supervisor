@@ -93,3 +93,19 @@
   再补上被吞掉的**收尾反引号**，最后复查控制字符为 0。
 - **为什么记忆深刻**：一次会话里 4 个记录文件共 22 处代码段被打断，`git` 命令、commit 号、路径全变了样；
   而这些文件是**唯一持久记忆**（会话会被 reset），坏了没有第二份。
+
+### E15 历史重置会删掉本会话的花费账本
+
+`future session reset` 执行 `DELETE FROM runs WHERE session_id=?`
+（`future-os/agent/src/session/sqlite_store/transcript.rs:187`；同一次还会删掉没有对应
+`runs` 行的 `run_events` / `run_snapshots`）。所以**每次原地重置，本会话此前的 token
+记账一起消失**。实测：8 次重置后本地只剩 42 行、`min(epoch)=4`，按它算出来是 ¥2.56，
+而 app usage 显示 ¥44+ —— 报出去就是错的一个数量级。
+
+- **判据**：回答"这个会话花了多少"以**服务端 usage** 为准；本地只能回答"自上次重置以来"。
+  要用本地算，先看 `min(epoch)` 有没有断层，有断层必须说明覆盖面。
+- **现在的做法**：`bin/monitor_roll.py` 在 reset 之前调 `bin/cost.py --snapshot`，把该段写进
+  `state/cost-ledger.jsonl`；`python3 bin/cost.py` 输出"归档 N 段 + 当前库 = 合计"，
+  并按 epoch 区间去重（重置失败时同一段不会被算两次）。
+- `~/.future/agent/session-backups/*.json` 只有条目（`entries`），**不含 token，补不了钱**——
+  别指望用备份还原花费。
