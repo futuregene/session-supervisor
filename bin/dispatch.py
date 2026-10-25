@@ -51,7 +51,8 @@ def stamp(t=None):
     return (t or now()).isoformat(timespec="seconds")
 
 
-def read(path=PATH):
+def read(path=None):
+    path = path or PATH
     if not os.path.exists(path):
         return []
     rows = []
@@ -69,13 +70,15 @@ def read(path=PATH):
     return rows
 
 
-def append(row, path=PATH):
+def append(row, path=None):
+    path = path or PATH
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "a", encoding="utf-8") as fh:
         fh.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
-def open_rows(path=PATH):
+def open_rows(path=None):
+    path = path or PATH
     """The last row per session whose state is open — a closed row hides it."""
     latest = {}
     for row in read(path):
@@ -86,7 +89,8 @@ def open_rows(path=PATH):
     return [row for row in latest.values() if not row.get("closed")]
 
 
-def closed_rows(path=PATH):
+def closed_rows(path=None):
+    path = path or PATH
     latest = {}
     for row in read(path):
         sid = row.get("session")
@@ -95,7 +99,8 @@ def closed_rows(path=PATH):
     return [row for row in latest.values() if row.get("closed")]
 
 
-def add(session, title, accept, repo="", note="", path=PATH):
+def add(session, title, accept, repo="", note="", path=None):
+    path = path or PATH
     """Record one dispatch. `accept` is required: a row nobody can judge is noise."""
     if not session:
         raise ValueError("a dispatch needs the session id it was opened for")
@@ -115,7 +120,8 @@ def add(session, title, accept, repo="", note="", path=PATH):
     return row
 
 
-def close(session, why="", path=PATH):
+def close(session, why="", path=None):
+    path = path or PATH
     rows = {row["session"]: row for row in open_rows(path)}
     row = rows.get(session)
     if row is None:
@@ -134,7 +140,8 @@ def age_hours(row, at=None):
     return max(0.0, ((at or now()) - then).total_seconds() / 3600.0)
 
 
-def prune(days=14, path=PATH):
+def prune(days=14, path=None):
+    path = path or PATH
     """Drop sessions whose dispatch closed longer than `days` ago.
 
     **All** rows of such a session go, not just the tombstone. `open_rows` reads the

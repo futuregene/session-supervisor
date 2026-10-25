@@ -468,6 +468,34 @@ rec = with_recorder(False)
 check("a missing --cwd is refused",
       run_main(["--new", "--cwd", "/nope/does/not/exist", feature_file]), 1)
 check("and nothing is launched", rec.launched, [])
+
+print("--new --accept: the dispatch is tracked, and its value is not the body")
+# Two things here, both found while opening the first tracked session (2026-10-25):
+# a session I open is one I owe a follow-up on (so the row must exist), and
+# `--accept` takes a value that must not be mistaken for the body file.
+import dispatch as dispatch_registry  # noqa: E402 - the module send.py imports
+saved_dispatch_path = dispatch_registry.PATH
+with tempfile.TemporaryDirectory() as dispatch_home:
+    dispatch_registry.PATH = os.path.join(dispatch_home, "dispatch.jsonl")
+    rec = with_recorder(False, info_missing=True)
+    rc = run_main(["--new", "--accept", "its export test passes",
+                   "--cwd", tempfile.gettempdir(), "--name", "导出 PDF", feature_file])
+    check("--accept before the body file still sends", rc, 0)
+    rows = dispatch_registry.read(dispatch_registry.PATH)
+    check("the dispatch is recorded", len(rows), 1)
+    check("with its acceptance check", rows[0].get("accept"), "its export test passes")
+    body = open(os.path.join(send.WATCH, "state", "relay-out.txt"), encoding="utf-8").read()
+    check("the body is the work order, not the flag value",
+          "实现一个导出 PDF" in body, True)
+    check("and the flag value is not in the body", "its export test passes" in body, False)
+
+    # Without --accept nothing is tracked, and the operator is told so rather
+    # than left believing the session will be re-checked.
+    rec = with_recorder(False, info_missing=True)
+    rc = run_main(["--new", "--cwd", tempfile.gettempdir(), feature_file])
+    check("no --accept still sends", rc, 0)
+    check("but records no dispatch", len(dispatch_registry.read(dispatch_registry.PATH)), 1)
+dispatch_registry.PATH = saved_dispatch_path
 os.unlink(feature_file)
 
 print("delivery is verified, not assumed")

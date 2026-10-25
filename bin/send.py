@@ -470,10 +470,17 @@ def main_new(argv):
     repo_cwd = parse_opt(argv, "--cwd")
     name = parse_opt(argv, "--name")
     note = parse_opt(argv, "--note")
-    known = {"--new", "--cwd", repo_cwd, "--name", name, "--note", note}
+    accept = parse_opt(argv, "--accept")
+    # Every flag that takes a value must be listed here: an unlisted value stays in
+    # `positional`, so `--accept "its test passes"` would have been taken as the
+    # body file whenever it was written before it (found while dispatching the
+    # first tracked session, 2026-10-25).
+    known = {"--new", "--cwd", repo_cwd, "--name", name, "--note", note,
+             "--accept", accept}
     positional = [a for a in argv if a not in known and not a.startswith("--")]
     if not positional:
-        print("usage: send.py --new --cwd <repo> [--name <title>] [--note <topic>] <text-file>")
+        print("usage: send.py --new --cwd <repo> [--name <title>] [--accept \"<what closes it>\"] "
+              "[--note <topic>] <text-file>")
         return 2
     text_file = positional[0]
 
@@ -487,7 +494,6 @@ def main_new(argv):
     # turn (user, 2026-10-25: 「请你积极开更多会话……并跟进所有这些会话」). Recording it
     # first means a relay that fails still leaves the row, which is the right way
     # round — an untracked session is the loss, not an extra row.
-    accept = parse_opt(argv, "--accept")
     if accept:
         record_dispatch(sid, name or "", accept, repo_cwd, note or "")
     else:
