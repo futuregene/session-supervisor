@@ -64,3 +64,33 @@
   这跟"分支上有未推送提交不能删"是同一类判断。
 - **反向症状**：项目根 `registry.json` 里可能还留着 `status: active`、但 `cwd` 指向已删除 worktree 的目标。
   这类残留不会自己消失，读 `registry.json` 时要按 `cwd` 是否存在过滤一遍，别当成"还在跑"。
+
+## G-：写工具被 `RECOVERY_UNCERTAIN` 锁住时，重放和 clone 都救不了
+
+**症状**：某会话的 `shell` / `write` / `edit` 一律返回
+`[RECOVERY_UNCERTAIN] The previous operation's effect could not be verified: shell (call_…)`，而 `read` 正常。
+
+**先定性，一眼就能看**：
+
+```
+python3 -c "select run_id,status,error from runs where session_id='<id>' and status='interrupted'"
+# 或看 history_shapes.payload 里 run_terminal 的
+#   state=interrupted_by_restart + interruption_cause=outcome_unknown
+```
+
+有 `outcome_unknown` 就是它——**宿主在工具调用在飞时崩溃**留下的。
+
+**三条看起来对、实际不通的路（别再花时间）**：
+
+| 尝试 | 为什么不行 |
+|---|---|
+| 按平台文案"逐字节重放挂起调用" | 闸门在恢复匹配**之前**就拦住，返回的仍是同一句通用 `RECOVERY_UNCERTAIN`，永远看不到 `RECORDED`/`ABORTED` 分支 |
+| `future session clone` | 克隆复制 `outcome_unknown` 记录，**锁随历史一起走**，新会话照样被锁 |
+| `future doctor` / `future data resume|rollback` | 与这个状态无关（后者只管 restore fence） |
+
+**能做的**：开新会话接续，把「已核实的磁盘状态 + 剩余步骤」写成 handoff 发过去；goal 的 supervisor
+用 `future goal supervisor register --session-id` 换绑（平台显式支持）。原会话**不要删**——它是证据。
+同时把原会话改名加标记，避免人再往里发任务。
+
+**顺带**：这是宿主 `phase=Failed("shutdown deadline exceeded")` 的下游后果。
+遇到一批会话同时被锁，先去查 `~/.future/app/logs/desktop.log` 里的 `host starting` / `Agent host finished`。
