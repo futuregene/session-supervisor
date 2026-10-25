@@ -66,11 +66,39 @@ def _unique(paths):
     return out
 
 
+def _worktree_main(path):
+    """The repository a git worktree belongs to, or `""` when `path` is not one.
+
+    A goal's state root is the directory the goal runs in, and a worker's cwd is
+    the worktree it was given — one level below that root and outside it. Reading
+    a worktree's `.git` file reaches the main checkout: `<main>/.git/worktrees/<n>`
+    is three levels under `<main>`. Without this, a worker that runs in a worktree
+    is invisible to `worker_sessions()` and wakes the supervisor for nothing.
+    """
+    try:
+        with open(os.path.join(path, ".git"), encoding="utf-8", errors="replace") as fh:
+            head = fh.readline().strip()
+    except OSError:
+        return ""
+    if not head.startswith("gitdir:"):
+        return ""
+    gitdir = head[len("gitdir:"):].strip()
+    if not os.path.isabs(gitdir):
+        gitdir = os.path.normpath(os.path.join(path, gitdir))
+    main = os.path.dirname(os.path.dirname(os.path.dirname(gitdir)))
+    return main if os.path.isdir(main) else ""
+
+
 def _state_dirs(roots):
-    """`<root>/.future/goal` and the legacy `<root>/.future/loop`, for each root."""
+    """`<root>/.future/goal` and the legacy `<root>/.future/loop`, for each root.
+
+    A worktree root also contributes its main repository: goals are created in the
+    checkout, while workers run in the worktrees cut from it (see `_worktree_main`).
+    """
     for root in roots:
-        for state_dir in (".future/goal", ".future/loop"):
-            yield os.path.join(root, *state_dir.split("/"))
+        for base in _unique([root, _worktree_main(root)]):
+            for state_dir in (".future/goal", ".future/loop"):
+                yield os.path.join(base, *state_dir.split("/"))
 
 
 def goal_entries(roots=None, extra_roots=()):
