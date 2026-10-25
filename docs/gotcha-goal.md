@@ -65,32 +65,103 @@
 - **反向症状**：项目根 `registry.json` 里可能还留着 `status: active`、但 `cwd` 指向已删除 worktree 的目标。
   这类残留不会自己消失，读 `registry.json` 时要按 `cwd` 是否存在过滤一遍，别当成"还在跑"。
 
-## G-：写工具被 `RECOVERY_UNCERTAIN` 锁住时，重放和 clone 都救不了
+### G6 写工具被 `RECOVERY_UNCERTAIN` 锁住时——先 `session reset` 丢工具卡，别再急着迁会话
 
-**症状**：某会话的 `shell` / `write` / `edit` 一律返回
-`[RECOVERY_UNCERTAIN] The previous operation's effect could not be verified: shell (call_…)`，而 `read` 正常。
+> 更新：原先这一节写的是「重放和 clone 都救不了 → 只能开新会话」。
+> **已找到原地解锁的办法**：`future session reset … --drop tool-calls,tool-results`。
+> 本文件保留原结论作为“哪些路不通”，但**首选动作改成 reset**。
 
-**先定性，一眼就能看**：
+### 症状
+
+某会话的 `shell` / `write` / `edit` 一律返回
 
 ```
-python3 -c "select run_id,status,error from runs where session_id='<id>' and status='interrupted'"
-# 或看 history_shapes.payload 里 run_terminal 的
-#   state=interrupted_by_restart + interruption_cause=outcome_unknown
+[RECOVERY_UNCERTAIN] The previous operation's effect could not be verified: shell (call_…)
+Work is preserved; no uncertain operation was repeated.
 ```
 
-有 `outcome_unknown` 就是它——**宿主在工具调用在飞时崩溃**留下的。
+而 `read` 正常。**先别信会话自己的归因**：被锁的会话常把原因说成“host 刚刚又崩了”，
+实测多次都不是——它撞上的是几小时前留下的标记（见下「先定性」）。
 
-**三条看起来对、实际不通的路（别再花时间）**：
+### 先定性，一眼就能看
+
+```bash
+python3 -c "
+import sqlite3,datetime
+c=sqlite3.connect('file:'+__import__('os').path.expanduser('~/.future/agent/agent.db')+'?mode=ro',uri=True)
+sid='<session-id>'
+for p,ts,cj in c.execute('select position,timestamp_ms,substr(content_json,1,160) from entries where session_id=? and entry_type=\"run_terminal\" order by position',(sid,)):
+    print(p, datetime.datetime.fromtimestamp(ts/1000).strftime('%m-%d %H:%M:%S'), cj[:140])
+"
+```
+
+找 `state=interrupted_by_restart` + `interruption_cause=outcome_unknown`：**宿主在工具调用在飞时崩了**，
+那个调用没记下结果，于是写工具被整体闸住。
+
+**顺带确认 host 现在到底好不好**（它常被冤枉）：
+
+```bash
+systemctl --user show future-host -p MainPID -p ActiveEnterTimestamp -p NRestarts
+ss -xlp | grep agent.sock          # 持有进程应与 MainPID 一致
+journalctl --user -u future-host --since "-2h" | grep -icE "failed|panic|deadline"
+```
+
+`MainPID` 与 socket 持有者一致、`NRestarts` 不涨、最近两小时 0 命中 → host 是好的，
+锁是**历史遗留**，不是刚崩的。
+
+### 首选：`future session reset --drop tool-calls,tool-results`
+
+```bash
+# 1) 先干跑看会删什么（--dry-run 是默认，不加 --yes 不落盘）
+future session reset <session-id> --keep-last 200 --drop tool-calls,tool-results
+
+# 2) 确认无误会删掉那个悬空调用后，再落盘
+future session reset <session-id> --keep-last 200 --drop tool-calls,tool-results --yes
+```
+
+它做三件事，都是我们要的：
+
+- **删掉「有调用、无结果」的悬空调用**（连同它对应的 tool-result —— 平台明确要求成对删，
+  留孤儿 result 会让之后的每个请求都失败）；
+- **会话记录不动**：id / 名字 / cwd / model / 两段 prompt / 权限 / 侧栏位置全部保留；
+- **先写无损备份**并打印路径（`~/.future/agent/session-backups/<id>-<ts>.json`，
+  完整 entries，不是摘要），删错了可回灌。
+
+实测：一个锁了约 6 小时的 supervisor 会话，reset 之后
+**下一条命令就正常执行**（clippy 全绿、后续 merge 干净）。此前同一类会话靠“迁新会话”处理过三次，
+三种代价都比 reset 高：要写 handoff、要 `goal supervisor register` 换绑、还多一个要人维护的旧会话名。
+
+**注意**：`--keep-last N` 里的 N 是**用户回合数**，不是条目数；`--keep-last 200` 的实际含义是
+「所有用户回合都保留，只丢工具卡」。丢卡之后，会话的助手文字还在，但它**引用不到任何旧命令输出**——
+所以给它的接续消息里必须把关键状态（分支、commit、远端、剩余缺口）重新写一遍。
+
+### 那三条仍然不通（别再花时间）
 
 | 尝试 | 为什么不行 |
 |---|---|
-| 按平台文案"逐字节重放挂起调用" | 闸门在恢复匹配**之前**就拦住，返回的仍是同一句通用 `RECOVERY_UNCERTAIN`，永远看不到 `RECORDED`/`ABORTED` 分支 |
+| 按平台文案“逐字节重放挂起调用” | 闸门在恢复匹配**之前**就拦住，返回的仍是同一句通用 `RECOVERY_UNCERTAIN`，永远看不到 `RECORDED`/`ABORTED` 分支 |
 | `future session clone` | 克隆复制 `outcome_unknown` 记录，**锁随历史一起走**，新会话照样被锁 |
 | `future doctor` / `future data resume|rollback` | 与这个状态无关（后者只管 restore fence） |
 
-**能做的**：开新会话接续，把「已核实的磁盘状态 + 剩余步骤」写成 handoff 发过去；goal 的 supervisor
-用 `future goal supervisor register --session-id` 换绑（平台显式支持）。原会话**不要删**——它是证据。
-同时把原会话改名加标记，避免人再往里发任务。
+### 什么时候仍然要迁会话
 
-**顺带**：这是宿主 `phase=Failed("shutdown deadline exceeded")` 的下游后果。
-遇到一批会话同时被锁，先去查 `~/.future/app/logs/desktop.log` 里的 `host starting` / `Agent host finished`。
+`reset` 只解决「悬空调用把闸门卡住」。以下情况照旧走「开新会话 + handoff + `goal supervisor register` 换绑」：
+
+- reset 之后**仍然**返回 `RECOVERY_UNCERTAIN`（说明这次的原因不是悬空调用）；
+- 那个会话的历史本身就**必须完整保留**（审计、举证），不能丢工具卡；
+- 会话的 prompt / 权限 / 模型配置也要换（reset 明确不改会话记录）。
+
+原会话**不要删**——它是证据。改名加 `⛔已锁·` 前缀，避免人再往里发任务。
+
+### 是什么造成的
+
+宿主 `phase=Failed("shutdown deadline exceeded")` 的下游后果。一次崩溃会**同时**锁住所有
+当时有工具调用在飞的会话，所以常见“一批会话一起挂”。要确认崩溃时刻：
+
+```bash
+journalctl --user -u future-host --since today | grep -E "starting|deadline|Failed"
+```
+
+`ActiveEnterTimestamp` 与某条 run 的 `completed_at_ms` 高度接近，就是那次重启打断了它。
+（反例：有个会话把自己刚发生的锁归因为“host 刚刚又崩了”，而 host 其实几小时前就没动过，
+锁根是那次重启。**先看时间戳，再信会话的叙述**。）
