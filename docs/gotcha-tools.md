@@ -247,6 +247,33 @@
   要么写 `failed` 并算进预算，要么重试，二者都不能悄悄吞掉。
 - 探针：`bin/selftest_deny.py` 的 `approve argv` 一条（19 个用例里的最后一个）。
 
+### D34 `cd` 只改 `$PWD`；`.NET` 的 `[System.IO.File]` 仍按**进程启动目录**解析相对路径
+
+本机的 shell 工具每次调用都是新进程，且**进程 cwd 固定为调用方的会话目录**，`cd` 改的只是 PowerShell
+自己的 `$PWD`。于是同一条命令里会出现两套解析规则：
+
+```
+cd $env:TEMP
+$PWD                                  → C:\Users\me\AppData\Local\Temp
+[System.IO.Directory]::GetCurrentDirectory()
+                                      → D:\<会话 cwd>        ← 没跟着 cd 变
+[System.IO.File]::WriteAllText('rel.txt', 'x')      → 落在 D:\<会话 cwd>\rel.txt
+Select-String -Path 'rel.txt'                      → 读的是 $PWD 下的那个
+```
+
+**两边都"成功"**，所以脚本不会报错——它写进了 A 仓、读的却是 B 仓的文件。
+
+- **表现**：批量改文件"全都改成功了"，但目标目录里没有改动，另一个仓（常是主 checkout）多出未提交修改；
+  别人的会话随后看到脏工作树，还以为是自己的。
+- **实测**（Windows + PowerShell 5.1，可复现）：`cd $env:TEMP` 后 `[System.IO.File]::WriteAllText('rel-probe.txt','x')`，
+  文件出现在**会话 cwd** 而 `$PWD` 指向 TEMP；`Test-Path 'rel-probe.txt'` 返回 `False`——PS cmdlet 找不到它。
+- **对策**：**凡是 `.NET` 静态方法 / `[IO.*]` / 某些库的 API，一律传绝对路径**。
+  要在脚本里批量改文件，先 `Push-Location` 并按 `$PWD` 拼绝对路径，或直接用 `Join-Path` 得到绝对路径再传。
+- **连带**：`cd <不存在的路径>` 只打印错误、**不终止脚本**，后续相对路径继续落到旧目录上——
+  这类失败不会让退出码变红，所以"命令没报错"不能证明它跑在你以为的目录里。
+- **自检**：收尾时 `git -C <目标仓> status --short` 与主 checkout 各看一次；
+  批量写之后**必须**回读目标文件（例如 `grep` 新内容），不能只看命令没报错。
+
 ### D33 用户**正在现场驱动**的会话不要替他批准
 - **表现**：用户在某个会话里逐条试「哪些请求不该通过自动审批」，而总管那层的 yolo 自动批准
   会把请求放行——既覆盖他刚点下的拒绝，又让被测对象失去意义。
