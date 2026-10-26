@@ -24,6 +24,11 @@ import goal_sessions  # noqa: E402
 # Scheduled-task runs of tasks that delete their session: the only channel that can
 # turn "that hourly task ran again" into a review, instead of a memory (bin/taskruns.py).
 import taskruns  # noqa: E402
+# A balance sample every few minutes, so a spend spike has a *shape* and not only a
+# daily total: on 2026-10-26 the account lost 346 credits in 97 minutes while this
+# machine's own runs accounted for 2.12 of them, and no local table could say when
+# the money left. Guarded by its own gap, so the 30 s scan does not flood the log.
+import balance_probe  # noqa: E402
 
 # Locating `future`/`python3`: discovery, not a hardcoded Homebrew path (see toolpath.py).
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -596,6 +601,21 @@ def main():
             log(f"event {ev['kind']}/{ev['priority']} task:{ev.get('sessionName')} :: {ev['summary'][:80]}")
         if len(task_events) > max(room, 0):
             log(f"task events dropped by per-scan cap: {len(task_events) - max(room, 0)}")
+
+    # --- platform balance sample -------------------------------------------
+    # Appends one point at most every `balance_probe_minutes`, so the daily
+    # briefing's single difference can be broken into a curve when it looks wrong.
+    # It never emits an event: this is telemetry, not something to wake anyone for.
+    if not baseline and cfg.get("balance_probe_enabled", True):
+        try:
+            gap = int(float(cfg.get("balance_probe_minutes", 10)) * 60)
+            res = balance_probe.probe(min_gap_seconds=gap)
+            if res.get("entry"):
+                log(f"balance sample: {res.get('summary', '')[:160]}")
+            elif res.get("skipped") not in ("fresh", None):
+                log(f"balance sample skipped: {res}")
+        except Exception as exc:  # noqa: BLE001
+            log(f"balance sample skipped ({type(exc).__name__}: {exc})")
     state["lastScanTs"] = now
 
     # prune very old session state (but never while the list is degraded: a session
