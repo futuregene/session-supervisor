@@ -92,6 +92,7 @@ echo "$(date '+%F %T') [watchd] start pid=$SELF_PID interval=${INTERVAL}s" >> "$
 
 while true; do
   "$PY" "$WATCH/bin/scan.py"          >> "$WATCH/logs/scan.log"   2>&1
+  "$PY" "$WATCH/bin/blind.py"         >> "$WATCH/logs/scan.log"   2>&1
   "$PY" "$WATCH/bin/approvals.py" auto >> "$WATCH/logs/approvals.log" 2>&1
   "$PY" "$WATCH/bin/notice.py" _trim     >> "$WATCH/logs/scan.log"   2>&1
   "$PY" "$WATCH/bin/directives.py" _expire >> "$WATCH/logs/scan.log" 2>&1

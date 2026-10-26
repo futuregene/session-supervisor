@@ -290,3 +290,24 @@
   往 PATH 里插一个遮蔽系统工具的 shim，还会影响所有脚本和用户自己的手动调用——代价大于收益。
 - **真正的修法在指令侧**：写给会话的话里不要出现"用 System Events 看可见应用列表"；改成 `lsappinfo` 或进程表。
   一条会反复触发的弹窗，根因通常是**我们自己的措辞**，而不是用户机器上的某个开关。
+
+### D-cli 换掉 `~/.future/bin/future` 不会换掉正在跑的 `future host`：全部 CLI 报 "Incompatible Future Agent"
+
+- **症状**：所有 `future …` 子命令（`session list`、`status`、`send`、`peek`、`task`、`life-docs`）
+  一起失败，错误是同一条：
+  `Incompatible Future Agent: Agent version <A> does not match client <B>; local startup is forbidden`。
+  会话本身**还在正常跑**（它们的 run 由已在运行的 Agent 提供），所以看起来"一切正常、只是我看不见东西"。
+- **机制**：`~/.future/bin/future` 被替换（重新构建/安装，例如本地开发装了个 `+local` 构建）时，
+  已经在跑的 `future host` 进程仍是**旧镜像**——`/proc/<pid>/exe` 会显示 `… (deleted)`。
+  新 CLI 与旧 Agent 的协议版本对不上，于是拒绝连接，并且因为已有 Agent 在跑，也不肯另起一个本地 Agent。
+  实测：host 起于 08:41（旧构建），磁盘上的二进制 09:10 被换 → 09:08 起 `session list` 全红。
+- **判据**：`tr '\0' ' ' < /proc/$(cat ~/.future/agent/agent-instance.json | python3 -c 'import json,sys;print(json.load(sys.stdin)["pid"])')/cmdline` 与
+  `stat -c '%y' ~/.future/bin/future` 一比：进程启动时间**早于**二进制 mtime，就是它。
+  `ls -l /proc/<pid>/exe` 显示 `(deleted)` 是决定性证据。
+- **修法**：重启 host（停掉那个 `future host` 再起 / 重开 FutureOS 应用），让 Agent 与 CLI 用同一个二进制。
+  **没有环境变量能绕过版本握手**，也不要绕过：Agent 与 CLI 协议可能真变了，硬连有写坏 `agent.db` 的风险。
+  重启会杀掉**所有在跑的 run**（含正在答用户的那一条），所以要么让用户动手，要么先回一句再等下一轮。
+- **对总管的后果：静默变瞎**。唤醒链是 `scan.py → decide.py → wake`，scan 全红 → 事件扫不进来 → 不唤醒，
+  而 `liveness_minutes`（180）即使到点也要靠 CLI 才能醒。所以 `bin/blind.py` 在 `watchd.sh` 里紧跟 `scan.py`：
+  连续 2 次同错误就 `notice.py add` + 重写 `reports/blind.md`，恢复时只打一行。
+  **排查入口顺序**：`reports/blind.md` → `state/health.json`(带 stderr 原文) → `grep -i blind logs/scan.log`。
