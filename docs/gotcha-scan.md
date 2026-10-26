@@ -71,3 +71,16 @@
 - **派工单前必须至少有一步能区分"用户删除"与"程序误删"的证据**，否则不要动用"停手/不要重启"这类重话——
   误报的代价（用户额度 + 我的可信度）比漏报更值得防。
 
+### B14 goal 根不在会话 cwd 下的 worker 会被当成普通会话唤醒
+- **表现**：验收脚本在 `%TEMP%` 下建 goal 根（`<tmp>/root/registry.json`，worker 的 cwd 是 `<tmp>/cwd`），
+  派出的 worker 会话照样进事件、报 `awaiting_user`，把我唤醒——而它是 `future goal` 的 worker，
+  按约定**不发消息、也不该唤醒**。
+- **原因**：`scan_skip_goal_sessions` 靠 `goal_sessions.objectives()` 找注册表，而它只认
+  **会话 cwd 下的 `.future/goal/registry.json`**（外加已登记的 state roots）。root 与 cwd 分离时找不到
+  这个 goal，skip 名单里就没有它的 worker。**`FUTURE_GOAL_ROOT` 不参与判定**（worker 自己的 shell 也看不到它——
+  shell 运行在常驻 agent 进程下，继承的是 agent 的环境，不是派工者的）。
+- **危害**：多花一次唤醒是小事；真正的风险是我按 `awaiting_user` 对一次**验收试验**发出"停手/纠偏"这类重话。
+- **对策（临时）**：看到首条 user 文本以 `future_goal_turn_envelope_v0` / `execution: cadence=…` 开头，
+  或会话名形如 `acceptance: …`，先 `peek` 确认它是 worker，只记录不介入。
+  **（根治）**让 `worker_sessions()` 也认 envelope 里的 goal id 或 `FUTURE_GOAL_ROOT`——改扫描器属本设施自身，走 PR。
+
