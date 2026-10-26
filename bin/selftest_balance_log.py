@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import os
 import pathlib
 import sys
 import tempfile
@@ -101,7 +102,15 @@ def main() -> int:
     ns = type("A", (), {"to": str(target)})()
     mod.cmd_install(ns)
     mod.__file__ = str(ROOT / "bin" / "balance_log.py")  # install always copies *this* file
-    check("install writes an executable copy", target.exists() and (target.stat().st_mode & 0o111),
+    # The executable bit is a POSIX property. Windows synthesises `st_mode` from
+    # the read-only attribute (0o666 / 0o444), so `& 0o111` is **never** set
+    # there: asserting it is unsatisfiable and only makes this selftest — and
+    # therefore `bin/selfcheck.py`, which every wake runs — permanently red on
+    # the one platform the supervisor actually runs on. Assert the bit where it
+    # means something; on Windows the copy existing is the whole contract, and
+    # the byte-identical check below covers the rest.
+    executable = target.exists() and (os.name == "nt" or bool(target.stat().st_mode & 0o111))
+    check("install writes an executable copy", executable,
           f"{target} exists={target.exists()}")
     check("the installed copy is byte-identical", target.read_bytes() == src)
     before = target.stat().st_mtime_ns
