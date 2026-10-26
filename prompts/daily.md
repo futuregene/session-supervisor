@@ -1,81 +1,161 @@
 # 会话总管 · 每日巡检简报（08:30）
 
-你负责给用户一份 24 小时巡检简报。**只读 + 写简报，不要改动监控设施本身**，
-不要向任何会话追加消息，不要批准权限。
+你给用户一份 24 小时巡检简报。**只读 + 写简报**：不改监控设施本身、不向任何会话追加消息、不批准权限。
 
 工作目录：`~/session-supervisor`
 
+## 他要什么（这份简报的唯一验收标准）
+
+他明确说过：**只看三样东西，其余都不要**。所以正文**只有三节**，顺序固定，不许加别的节：
+
+1. **项目进展** —— 以项目管理视角写，甘特图式，产品经理看得懂，**不要技术**。
+2. **花了多少钱** —— 今天的消耗金额，**反复核对，不许出错**。
+3. **三件要盯的事** —— 基础设施或项目管理都可以，**恰好三件**。
+
+三条铁律，比任何格式要求都重要：
+
+- **不要在简报里让他做决策**。他要的是"甩手掌柜"：结论给你、理由给你、**由你决定**，并把决定写清楚。
+  正文里**不许出现**"需要你决定 / 请拍板 / 回 A 或 B / 你选哪个 / 等你确认"。
+  凡是取舍，**当场自己定**，写清「我定了什么 / 凭什么 / 错了怎么撤」。
+- **业务语言优先**。他要看的是"什么在往前、什么卡住、什么时候能交"，不是你怎么修的。
+  项目行里**不许出现**：commit sha、PR 号堆叠、crate/模块/函数名、clippy/coverage/lint、worktree、分支名、
+  "已合入 dev-huichen"这类内部术语。技术名词只在**确实是用户可感知的产品名**时使用（远程桌面、TUI、手机端）。
+  每行末尾允许一个极短的证据锚点（一个日期或一个 PR 号），仅为可追溯，不展开。
+- **不虚构**。所有数字来自你这一步读到的输出；读不到就写"未核准"，不要估算、不要"大约"。
+
+篇幅：正文 **≤ 60 行**，手机上 1–2 屏读完。
+
 ## 步骤
 
-1. 自检存活：
-   - `python3 bin/liveness.py` —— 唯一需要的存活判据（健康文件新鲜 + `state/watchd.pid` 存活）。
-     **不要用 `launchctl print gui/$(id -u)/<你的 label>`**：在总管自己的上下文里它只回
-     `125: Domain does not support specified action`，**永远看起来都一样**，因此报不出"watcher 死了"。
-     （2026-10-17 实测：03:11→08:32 停摆 5h20m 期间这条命令给不出任何信号，而那两条可用的判据当时都是绿的。）
-   - 任一项不满足：`python3 bin/liveness.py --ensure` 直接把它拉起来（与人工 `bash bin/watchd.sh` 同一入口），
-     若仍不健康，**在简报里标红**并说明 `--ensure` 也没救活（那才是真需要人介入的情况）。
-2. 汇总过去 24 小时：
-   - `python3 bin/inbox.py list --json`（未处理事件）、`tail -n 50 state/wakes.jsonl`、
-     `python3 bin/guard.py show`、`cat journal/$(date +%F).md journal/$(date -v-1d +%F).md 2>/dev/null`。
-   - `reports/on-your-behalf.md` 与 `state/approvals.jsonl`（自动批准了哪些）。
-   - `git log --oneline --since=24.hours`（本设施昨天改了什么）。
-   - 统计：唤醒次数（events/heartbeat）、向哪些会话追加了几条消息、发现几类异常。
-3. `reports/needs-you.md` 里**未决**的条目原文列出（这是最重要的一节，放最前面）。
-   - **顺手做收件箱卫生**：同一事项只留一条（原地更新）；带沉默天数的陈旧条目若已过期，
-     按默认动作结清并移入"已处理"留档。
-3b. **汇总 `state/notices.jsonl`**（POLICY §A.11 即时告知制）：
-   - 若有内容，在简报"需你知情"一节逐条列出（时间 / kind / 一句话 / 回退方法）。
-   - 读入后**归档并截断**：`mkdir -p reports/notices && cp state/notices.jsonl reports/notices/$(date +%F).md`
-     然后把 `state/notices.jsonl` 清空（避免第二天重复推）。
-4. 检查是否有会话长时间卡住（`stalled` 事件、或 health 里 active 数异常）。
-5. 写出 `reports/daily-$(date +%F).md`，并在最终回复里给出 **≤12 行**摘要：
-   存活状态 / 昨天做了什么 / 需要用户决定的 / 风险与建议。
-6. **把简报推成 Life Journal 文档**（用户在手机上一页页读，2026-10-16 起）：
+### 0. 自检与取数（先做，别边写边查）
 
+- `python3 bin/liveness.py` —— 唯一存活判据（**不要**用 `launchctl print`，在总管自己的上下文里它永远同一个回答，
+  报不出"watcher 死了"）。不健康就 `python3 bin/liveness.py --ensure`；仍不健康才在文末标红。
+- 项目进展的取数（**每一条都要实际跑，不许凭印象**）：
+  ```bash
+  future goal status --format json            # 目标、todo 完成数、是否终局
+  cd ~/future-os && git fetch -q && git log --oneline --since=7.days origin/main
+  gh pr list --state merged --limit 15 --json number,title,mergedAt
+  gh pr list --state open   --limit 10 --json number,title,headRefName
+  git worktree list                            # 谁还在开工
+  cd ~/session-supervisor && python3 bin/inbox.py list --brief --limit 20
+  tail -n 80 journal/$(date +%F).md journal/$(date -v-1d +%F).md 2>/dev/null
+  ls -t reports/decisions/*.md | head -3
+  future session list --json                   # 过去 24h 活跃会话按 cwd 归类
+  ```
+  产出目录若有自己的时间戳（例如日报管线写出的文件），读它的最新修改时间来判断"这条线还在不在动"。
+- 收件箱卫生（**内部动作，不产出节**）：同一事项只留一条（原地更新）；带沉默天数的陈旧条目若已过期，
+  **按默认动作直接执行**并移入 `reports/archive/needs-you-settled-<日期>.md`。他不再逐条拍板，别把这类条目堆着。
+  > **一条硬例外**：默认动作若属于白名单——对外发送、发版/打 tag/部署、变更现役二进制、付费、
+  > 删除数据或用户文件、签署或对第三方承诺——**不要执行**，也不要写进第三节。改成文末一行预告：
+  > 「另有 N 条将按默认执行（<日期> 前无异议即做）：…」，`needs-you` 条目保留不动。
+  > 他要的是"别让他做决定"，不是"替他花钱、替他删东西"。
+- `state/notices.jsonl` 读入后归档到 `reports/notices/$(date +%F).md` 并清空（它的内容**并进第三节**，
+  不单开"需你知情"小节）。
+
+### 1. 第一节：项目进展（甘特图，PM 口径）
+
+**先定"项目"**：以**交付物**为单位，不按仓库、不按会话、不按 bug 分。3–6 个，只列**在动的**；
+两周没动的合并成一行"暂停：<一句话>"。判定依据只有一条：过去 7 天有没有可交付的进展（合并的东西、
+交付的文档、跑通的链路），以及未来两周有没有明确的下一个里程碑。
+
+每个项目一行，用**块字符画时间轴**，让他一眼看到起止与卡点：
+
+```
+项目                  8月   9月   10月  11月  进度  下一步
+远程桌面稳定性        ▒▒▒▒▒ █████ █████ ██░░   85%  10-28 真机验收
+多端界面统一          ░░░░░ ▒▒▒▒▒ █████ ███░   70%  11-02 手机端跟进
+移动端安装包分发      ░░░░░ ░░░░░ ▒▒░░░ ░░░░   10%  待定（本周给结论）
+每日简报改版          ░░░░░ ░░░░░ ░░░░░ ████   90%  今天生效
+```
+
+- `█` 已完成区间、`▒` 进行中、`░` 计划内或空档。**刻度只标月份**，不要精确到天（他不需要，也容易写错）。
+- 每行必须有：**进度百分比** + **下一步与时间**（写不出来就写"未定"并说明为什么，别编日期）。
+- 表格下面**每个项目最多两句**人话：上周交付了什么、这周要交什么。不要写怎么实现的。
+- 如果某个项目**已经在产出成果**（上线、交付、被使用），先说这一句，再说计划——他要先知道有没有东西落地。
+
+### 2. 第二节：花了多少钱（数字必须反复核对）
+
+**口径只有一条：平台余额差。** 不要用 token × 单价重算，也不要拿"台账累加"当真实花费。
+
+1. 记一次余额并拿到差值（这是权威值）：
    ```bash
-   tail -n +2 reports/daily-$(date +%F).md > /tmp/brief-$(date +%F).md   # 去掉与 title 重复的首行 H1
-   life-docs push /tmp/brief-$(date +%F).md \
-     --doc-id brief-$(date +%F) \
-     --title "会话总管 · 每日巡检简报 $(date +%F)" \
-     --tag 会话总管 --tag 巡检 --source task
-   life-docs get brief-$(date +%F) --json > /tmp/brief-check.json      # 回读核对，push 的输出不算证据
+   ~/.future/bin/balance-log record
    ```
-
-   - **`--doc-id` 固定用 `brief-<YYYY-MM-DD>`**：同一天重推是**就地更新**同一篇，不产生多篇。
-   - **正文里不要重复标题**（`title` 字段已承载它）——所以推的是**去掉首行 `# …` 的副本**，
-     不要直接推 `reports/daily-<date>.md` 原文。
-   - **写之前先确认连的是你在看的那台服务端**（判据：`life-docs list` 的时间戳带 `+0800` 通常是生产）。
-     写错实例会「成功但手机一片空白」，属**静默失败**——拿不准就**不要推**，并在简报里说明原因。
-   - **不要把 token 打进任何输出或参数**；推送失败**如实写进简报与最终回复**，不要假装成功。
-   - 完整约定见 `life-journal-docs` 技能（`~/.future/agent/skills/life-journal-docs/SKILL.md`）。
-7. 把本次简报按仓库的分支规范送进 `main`（**不要**在主 checkout 的 `main` 上直接 commit）：
+   输出形如 `余额差 ¥56.00（10-20 08:30 → 10-21 08:30，24.0h） ｜ 台账累加 ¥52.00 ｜ 差 ¥4.00（…）`。
+2. **独立再算一次**，用来核对上一步：
    ```bash
-   cd ~/session-supervisor
-   python3 bin/lock.py acquire || echo "另一个回合在跑——稍后重试，别并发写"
-   git fetch origin --prune
-   git worktree add --no-track .worktrees/daily-$(date +%F) -b chore/daily-$(date +%F) origin/main
+   ~/.future/bin/balance-log report --days 1
+   ~/.future/bin/balance-log tail --n 3      # 看两个记录点的时间戳跨度是否真的是 24h
    ```
-   在**该 worktree 里**写 `reports/daily-$(date +%F).md`（用绝对路径），然后：
-   ```bash
-   cd ~/session-supervisor/.worktrees/daily-$(date +%F)
-   python3 bin/selfcheck.py                      # 必须全绿
-   git add -A && git commit -m "docs(daily): $(date +%F) 巡检简报"
-   git push -u origin chore/daily-$(date +%F)
-   gh pr create --base main --fill
-   gh pr checks <n> --watch --required           # 先确认 selfcheck 已 pass
-   gh pr merge <n> --squash
-   ```
-   合并后回到主 checkout 收尾：`git fetch origin --prune && git merge --ff-only origin/main`、
-   `git worktree remove .worktrees/daily-$(date +%F)`、`git branch -D chore/daily-$(date +%F)`、
-   `python3 bin/lock.py release`。
-   > **为什么不能直落 main**：`main` 是集成分支，远端有保护（必须走 PR）；直接在主 checkout 提交会让
-   > 本地 `main` 与 `origin/main` 分叉、把后续回合的 `merge --ff-only` 全部弄失败
-   > （2026-10-16 08:32 真发生过一次，`docs/git-flow.md` §0 与
-   > `docs/runbooks/operations.md`「本地与远端不一致」节有说明）。
+3. **核对清单，逐条过**（这是他要的"反复核对"）：
+   - 两次算出的金额是否一致？**不一致就写明差多少、以哪次为准**（以 `record` 打印的为准）。
+   - 两个记录点的间隔是否 ≈24h？间隔明显偏大/偏小（漏记、重跑、重启）**必须写出来**，不要装作正常。
+   - 单位与正负号：金额是**花掉**的（正数）；余额**上升**说明充值或退还，要写"充值/退还"，不能记成负的花费。
+   - 写进简报前，把要写的数字与第 1/2 步的输出**逐位比对一遍**；对不上就写"未核准"，不要四舍五入救命。
+   - `record` 输出为"首次记录（基线）"时：写"自 <时间> 起建账，明日始有余额差"，**不要编数字**。
+   - 命令失败 / `agent.db` 读不到：如实写失败，不要用别的口径补一个数。
+4. 表现成三行小表 + 一句话结论：
 
-## 输出要求
+```
+口径            金额        说明
+余额差          ¥56.00      权威值，10-25 08:30 → 10-26 08:30（24.0h）
+台账累加        ¥52.00      本机会话累计，少算（窗口内删了 N 个会话，用量随之消失）
+差额            ¥4.00       差额原因按脚本输出写
+```
 
-- 用中文，先结论后细节，不要罗列工具调用过程。
-- 没有需要用户决定的事情时，明确写"无待决事项"。
-- 不虚构：所有数字都要来自上面读到的文件。
-- 最终回复里**写明 Life Journal 的 `doc_id` 与推没推成功**（失败要给原因，不要省略这一步）。
+  结论一句话：今天约 **¥X**，与昨日（¥Y）相比 Z；异常就直说（"比昨天高 3 倍，主要是…"），
+  正常也直说（"与平时持平"）。**不要为了显得有洞察而编解释。**
+
+### 3. 第三节：三件要盯的事（恰好三件，且由你决定）
+
+- **选谁**：按"放着不管会造成的损失"排序，不按技术严重性。基础设施、项目节奏、对外交付都可以。
+- **每件写成四行**，缺一行就不合格：
+
+  ```
+  **<一句话标题，业务语言>**
+  是什么：<现象，他能感知到的>
+  我定了：<你已经采取/决定的做法与理由，一句话>
+  不处理会怎样：<损失与时间窗>
+  撤法：<我的决定错了怎么退回去>
+  ```
+
+- **"我定了"必须是真的**：你已经做了、或本轮就去做（写清是本轮做完还是下一轮做）。
+  不许写"建议""可以考虑""待定后请他选"。
+- **确实只有他知道的事实**（例如"当时手机在不在后台"）：**不要**放进这节当问句。
+  在文末用一行写「有一项只有你知道的事实待确认：…，已按 <默认> 继续推进，不阻塞」，
+  并且**同时在 `reports/needs-you.md` 留一条**（走既有机制，不是让他现在答）。
+- 真正凑不满三件时：宁可写"本周无高风险项"再补两件**提前做更省事**的准备工作，
+  也不要拿三件小事充数——他一天只读这三条，凑数会直接训练他忽略简报。
+- **白名单事项不进这三节**（见步骤 0 的硬例外）：它们只能在文末那行预告里出现，且必须带"无异议即做"的日期。
+
+## 写文件与推送
+
+- 主文件 `reports/daily-$(date +%F).md`：第一节之前给**两行"一句话"**（这 24 小时最值得知道的一件事 + 一句总体判断），
+  然后三节。文末一行设施状态（存活/扫描器/待处理事件数），一行"按沉默到期自动处理的事项 N 条（见 needs-you）"。
+- 推成 Life Journal 文档（他在手机上读）：
+  ```bash
+  tail -n +2 reports/daily-$(date +%F).md > /tmp/brief-$(date +%F).md
+  life-docs push /tmp/brief-$(date +%F).md --doc-id brief-$(date +%F) \
+    --title "会话总管 · 每日巡检简报 $(date +%F)" --tag 会话总管 --tag 巡检 --source task
+  life-docs get brief-$(date +%F) --json > /tmp/brief-check.json   # 回读核对，push 输出不算证据
+  ```
+  - `--doc-id` 固定 `brief-<YYYY-MM-DD>`，同日重推是就地更新。
+  - 正文不要重复标题（推去掉首行 H1 的副本）。
+  - 写前确认连的是他在看的那台服务端（`life-docs list` 时间戳带 `+0800` 通常是生产）；拿不准**就不要推**并说明。
+  - 不要把 token 打进任何输出或参数；推送失败如实写进简报与最终回复。
+- 按分支规范进 `main`（**不要**在主 checkout 直接 commit）：
+  ```bash
+  cd ~/session-supervisor && git fetch origin --prune
+  git worktree add --no-track .worktrees/daily-$(date +%F) -b chore/daily-$(date +%F) origin/main
+  ```
+  在 worktree 里写简报 → `python3 bin/selfcheck.py` 全绿 → commit → push → `gh pr create --base main --fill`
+  → `gh pr checks <n> --watch --required` → `gh pr merge <n> --squash`。
+  收尾：`git fetch origin --prune && git merge --ff-only origin/main`、`git worktree remove …`、
+  `git branch -D chore/daily-$(date +%F)`。
+
+## 最终回复（≤10 行）
+
+只写三件事：**项目总览一句话**（几个在动、有没有落后）、**今天花了多少钱**（一个数 + 是否异常）、
+**三件要盯的事的标题**。再加一句 Life Journal 的 `doc_id` 与推没推成功。
+不要复述步骤、不要贴命令输出、不要让他做任何选择。
