@@ -75,11 +75,19 @@ state 重写一份（`digest(..., task=, runs=, state=)`，不必再联网），
      （本地副本一定过期；`task edit --prompt-file` 是整份覆盖、没有合并）；
    - 改完 `future task edit <id> --prompt-file /tmp/task.md`，并用
      `future task show <id> --json | grep -c '<关键规则特征串>'` 确认没把既有规则挤掉；
+   - **不要顺手传空字符串**：`--model ""` / `--thinking ""` 是**写入空值**，不是"保持不变"。
+     不需要改的字段就别传；传了就回读核对。而这类任务多半 `session retention = delete`，
+     台账里已经没有 `session_id` 可回溯，**原来是什么值查不回来**，只能按同机其它任务的一致取值补。
    - **改触发时间/周期会改变用户看到的节奏**，先记 `reports/decisions/` 再动。
-4. **留痕**：`reports/decisions/<日期>.md` 一条（做了什么 / 依据 / 回退 =
+4. **"请示"必须有一个能落地的地方**：任务的会话跑完就删，它写进报告的"请用户决定"**只有总管读得到**
+   （经 `bin/taskruns.py digest`）。所以提示词里凡是让任务"请示"的规则，都要配一个**让决定生效的持久入口**，
+   否则同一件事会被反复请示、每轮都重跑一遍判定。本部署实测的次数与事故经过记在 `.future/memory/`。
+   做法：由总管维护一份状态（本部署是 `~/.future/pr-sweep/state.json` 的 `holds` 键：
+   `{ref, tip, until, why}`），提示词规定"命中就只写一行、不再升级"。**判据落在状态里，不靠每轮重新推导。**
+5. **留痕**：`reports/decisions/<日期>.md` 一条（做了什么 / 依据 / 回退 =
    `future task prompt revert <id>`），有必要的用 `future task feedback <run-id> good|bad --note "…"`
    给这一轮打分——台账里那一列空着，复盘就没有历史可用。
-5. **收尾**：`python3 bin/taskruns.py reviewed <id>`。不做这步，下一轮不会重新提醒（这是有意的：
+6. **收尾**：`python3 bin/taskruns.py reviewed <id>`。不做这步，下一轮不会重新提醒（这是有意的：
    提醒本身要花一次唤醒）。
 
 ## 5. 参数（`bin/config.json`）
