@@ -175,10 +175,21 @@ real_kind, _why = turn_prompt.mode(ROOT)
 # failed on a correctly-installed minimal supervisor. Assert the real contract per
 # mode instead: the manual is in the message iff the append is verified live.
 check("real composition is non-empty", bool(real.strip()), True)
+# "peek.py" is the wrong proxy for "the manual is in the message": `compose` adds
+# the open-dispatch footer to the *card*, and that footer itself says
+# `python3 bin/peek.py <id>`. So this check went red the moment the first dispatch
+# was opened — i.e. on a correct install, most of the time (2026-10-26: 11 open
+# dispatches, minimal mode verified, message correctly card-only). Use a marker
+# that exists only in append.md.
+MANUAL_MARKER = "会话总管 · 操作手册"
+check("the marker is unique to the manual",
+      MANUAL_MARKER in open(os.path.join(ROOT, "prompts", "append.md"), encoding="utf-8").read()
+      and MANUAL_MARKER not in open(os.path.join(ROOT, "prompts", "turn.md"), encoding="utf-8").read(),
+      True)
 if real_kind == "minimal":
-    check("minimal real message drops the manual", "peek.py" in real, False)
+    check("minimal real message drops the manual", MANUAL_MARKER in real, False)
 else:
-    check("full real message carries the manual", "peek.py" in real, True)
+    check("full real message carries the manual", MANUAL_MARKER in real, True)
     check("full real message is larger than the card alone", len(real) > 500, True)
 manual = open(os.path.join(ROOT, "prompts", "append.md"), encoding="utf-8").read()
 check("real manual names the lock step", "lock.py acquire" in manual, True)
