@@ -12,6 +12,16 @@ import os
 import sys
 import time
 
+# Windows consoles default to a legacy code page (cp936 on the deployment box), and
+# `list --json` prints Chinese summaries verbatim — so a plain `python3 bin/inbox.py
+# list --json` died with UnicodeEncodeError and exit 1, i.e. the documented way to read
+# a full event body was unusable exactly where the manual says to use it. Force UTF-8 on
+# stdout instead of depending on the caller's codepage or on PYTHONIOENCODING being set.
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
 WATCH = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PENDING = os.path.join(WATCH, "inbox", "pending.jsonl")
 HANDLED = os.path.join(WATCH, "inbox", "handled.jsonl")
