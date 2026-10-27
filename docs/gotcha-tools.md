@@ -338,3 +338,16 @@ Select-String -Path 'rel.txt'                      → 读的是 $PWD 下的那�
   而 `liveness_minutes`（180）即使到点也要靠 CLI 才能醒。所以 `bin/blind.py` 在 `watchd.sh` 里紧跟 `scan.py`：
   连续 2 次同错误就 `notice.py add` + 重写 `reports/blind.md`，恢复时只打一行。
   **排查入口顺序**：`reports/blind.md` → `state/health.json`(带 stderr 原文) → `grep -i blind logs/scan.log`。
+
+## `taskruns.py digest` 的输出是**快照**，不是实时状态
+
+`bin/taskruns.py digest <task-id>` 只把摘要**写进** `state/task-digests/<task-id>.md` 就返回路径，
+之后文件不会自己更新。隔一段时间再 `cat` / `sed` 那个文件，看到的是**它上次被生成时**的台账，
+里面那条 `running` 可能早已完成——实测因此把一轮 16 分钟就跑完的任务误判成"卡了 54 分钟"，差点为它派工单。
+
+- 要现在的状态：**重新跑一遍 `bin/taskruns.py digest <task-id>`**，或直接问权威来源
+  `future task runs <task-id> --limit 2 --json`（字段含 `status` / `startedAt` / `finishedAt` /
+  `resultSummary` / `errorMessage` / `finishReason`）。
+- 判断"卡住"的门槛要用**同一任务的历史用时**做基线（本例 12–40 分钟都出现过），
+  别用"我这个模型觉得久"。
+- 凡是"我在某个文件里读到它还没结束"这类结论，先问一句：**这个文件是谁在什么时候写的**。
