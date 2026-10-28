@@ -93,10 +93,13 @@ def future(cfg, args, timeout=30):
         return 127, "", str(exc)
 
 
-def streaming_sessions(cfg, sids, cap=8):
-    """Subset of `sids` whose session is running a turn right now.
+def session_states(cfg, sids, cap=8):
+    """Who is running a turn, and who no longer exists at all.
 
-    An `awaiting_user` event means the session stopped and waits for an answer;
+    Returns `(busy, gone)`.
+
+    `busy` — the session is mid-turn. An `awaiting_user` event means the
+    session stopped and waits for an answer;
     that premise dies the moment the user answers, because the session starts a
     new run. Then there is nothing this facility can do: answering would land
     inside a turn that is already handling the same question, and
@@ -105,21 +108,37 @@ def streaming_sessions(cfg, sids, cap=8):
     session was already `isStreaming=true` — the whole turn was spent on a
     premise that no longer held.
 
-    Unreadable status is deliberately *not* treated as busy: waking on an event
+    `gone` — the session is not there any more (`session status` answers
+    "Session not found", rc 1). That is not an anomaly, it is how a scheduled
+    task with `session retention = delete` ends: its run settles, an
+    `awaiting_user` event is emitted for it, and the session is removed before
+    the wake happens. Measured 2026-10-29: four such events woke the supervisor
+    between 23:00 and 00:08, each one ending in "Session not found" and an ack.
+    The run itself is watched through the task ledger (`taskruns.py`), so there
+    is nothing here to read and nothing to answer.
+
+    Unreadable status is deliberately *not* treated as either: waking on an event
     we could not check is the safe direction, and it keeps this from turning a
     transient agent hiccup into silence.
     """
-    busy = set()
+    busy, gone = set(), set()
     for sid in list(sids)[:cap]:
-        rc, out, _ = future(cfg, ["session", "status", sid, "--json"], timeout=20)
+        rc, out, err = future(cfg, ["session", "status", sid, "--json"], timeout=20)
         if rc != 0:
+            if "not found" in f"{out}{err}".lower():
+                gone.add(sid)
             continue
         try:
             if json.loads(out).get("isStreaming"):
                 busy.add(sid)
         except Exception:  # noqa: BLE001
             continue
-    return busy
+    return busy, gone
+
+
+def streaming_sessions(cfg, sids, cap=8):
+    """Subset of `sids` whose session is running a turn right now."""
+    return session_states(cfg, sids, cap=cap)[0]
 
 
 def has_new_pending(pending_ids, seen_ids):
@@ -369,12 +388,36 @@ def main():
     # the wake itself is skipped, which is what `pending` below drives. Order is
     # pending.jsonl's (oldest first), so the cap below is deterministic.
     sid_order = list(dict.fromkeys(e.get("sessionId") for e in pending if e.get("sessionId")))
-    busy = streaming_sessions(cfg, sid_order, cap=int(cfg.get("max_status_checks_per_cycle", 8)))
+    busy, gone = session_states(cfg, sid_order, cap=int(cfg.get("max_status_checks_per_cycle", 8)))
     if busy:
         kept = [e for e in pending if e.get("sessionId") not in busy]
         log(f"deferred {len(pending) - len(kept)} event(s) in {len(busy)} streaming "
             f"session(s): premise gone, nothing to do this cycle")
         pending = kept
+    if gone:
+        # A session that is not there any more cannot be answered or nudged.
+        # `session retention = delete` tasks settle into exactly this, a few
+        # seconds after their `awaiting_user` event was emitted; the run itself
+        # is covered by the task ledger. Retiring the event is the honest close;
+        # leaving it pending would re-report the same dead premise every cycle,
+        # and suppressing it without the ack would hide a session that vanished
+        # for a reason we have not seen yet — so the count and the ids are logged,
+        # and the events land in handled.jsonl where they can be audited.
+        dead_ids = [e["id"] for e in pending if e.get("sessionId") in gone and e.get("id")]
+        log(f"{len(dead_ids)} event(s) in {len(gone)} vanished session(s) "
+            f"({', '.join(sorted(gone)[:3])}{'…' if len(gone) > 3 else ''}): "
+            "nothing left to read or answer")
+        if dead_ids:
+            try:
+                moved, _kept = inbox_mod.ack(dead_ids, pending_path=PENDING, handled_path=HANDLED,
+                                            now_ms=int(now * 1000))
+            except Exception as exc:  # noqa: BLE001
+                log(f"ack of vanished-session events failed ({type(exc).__name__}: {exc}); "
+                    "leaving them pending")
+            else:
+                retired = {m.get("id") for m in moved}
+                pending = [e for e in pending if e.get("id") not in retired]
+                log(f"retired {len(moved)} vanished-session event(s)")
     if len(sid_order) > int(cfg.get("max_status_checks_per_cycle", 8)):
         log(f"{len(sid_order)} sessions have pending events; only the first "
             f"{int(cfg.get('max_status_checks_per_cycle', 8))} were checked for a live run")

@@ -412,6 +412,58 @@ for label, spec in (
         check(f"{label} still wakes", len(calls), 1)
         check(f"{label}: the event stays pending", pending_ids(tmp), ["ev_1"])
 
+
+print()
+print("vanished sessions (a `retention = delete` task is not a question)")
+
+
+def status_cli(rc=1, out="", streaming=(), only_sid=None):
+    """Stand-in for `future` that answers only `session status`.
+
+    `only_sid` keeps the failure to that one session: the wake path also asks the
+    *monitor* session for its status, and an unreachable agent there defers the
+    wake for its own (correct) reason — which would make a test pass for the
+    wrong reason.
+    """
+    def _call(cfg, args, timeout=30):
+        if args[:2] == ["session", "status"]:
+            sid = args[2]
+            if rc != 0 and (only_sid is None or sid == only_sid):
+                return rc, out, ""
+            return 0, json.dumps({"isStreaming": sid in streaming,
+                                  "sessionName": "n", "queryCount": 9}), ""
+        return 127, "", f"unexpected call: {args}"
+    return _call
+
+
+# A scheduled task with `session retention = delete` removes its session seconds
+# after the run settles — and after scan.py already emitted `awaiting_user` for it.
+# Measured 2026-10-29: four such events woke the supervisor between 23:00 and
+# 00:08, each one ending in "Session not found" and a hand-typed ack.
+with tempfile.TemporaryDirectory() as tmp:
+    rc, calls = run_main(tmp, lambda argv, **kw: None, pending_rows=(au("ev_1", question=True),),
+                         future_fn=status_cli(1, "Session not found: s1", only_sid="s1"),
+                         # The idle-heartbeat is off here for the same reason it is off
+                         # in production: with it on, any cycle reaches the spawn and
+                         # the check below would pass without the retired event mattering.
+                         cfg_extra={"skip_idle_heartbeat": True})
+    check("a vanished session does not wake anyone", len(calls), 0)
+    check("its event does not stay pending", pending_ids(tmp), [])
+    handled = [json.loads(ln) for ln in open(os.path.join(tmp, "inbox", "handled.jsonl"),
+                                             encoding="utf-8") if ln.strip()]
+    check("the retirement is recorded as handled", [e.get("id") for e in handled], ["ev_1"])
+    check("the log says why", "vanished" in log_text(tmp), True)
+
+# The other half of the rule: unreadable status is *not* "gone". Waking on an
+# event we could not check is the safe direction (a transient agent hiccup must
+# not turn into silence).
+with tempfile.TemporaryDirectory() as tmp:
+    rc, calls = run_main(tmp, lambda argv, **kw: None, pending_rows=(au("ev_1", question=True),),
+                         future_fn=status_cli(1, "unable to connect to Future Agent: transport error",
+                                              only_sid="s1"))
+    check("an unreadable status still wakes", len(calls), 1)
+    check("and its event stays pending", pending_ids(tmp), ["ev_1"])
+
 print()
 if FAILED:
     print(f"FAILED ({len(FAILED)}):")

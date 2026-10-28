@@ -19,7 +19,8 @@
 | 事件唤醒最小间隔 | 一个事件唤醒后，下一轮至少隔这么久 | `config.min_wake_gap_seconds` |
 | 唤醒上限 | 每小时/每天封顶，超出即 suppressed 并记日志 | `config.max_wakes_per_hour/day`、`bin/decide.py` |
 | high/medium 事件 | 立刻唤醒，只受最小间隔约束 | `bin/decide.py`、`NOTIFY_PRIORITY` |
-| **事件所属会话正在跑** | **不作为唤醒理由**：`awaiting_user` 的前提（已停下等回复）在用户回一句后就失效，此刻也发不出消息（只会排队）。事件**不 ack、留在 pending**，会话空闲后下一轮照常唤醒 | `bin/decide.py` 的 `streaming_sessions()`、`config.max_status_checks_per_cycle` |
+| **事件所属会话正在跑** | **不作为唤醒理由**：`awaiting_user` 的前提（已停下等回复）在用户回一句后就失效，此刻也发不出消息（只会排队）。事件**不 ack、留在 pending**，会话空闲后下一轮照常唤醒 | `bin/decide.py` 的 `session_states()`、`config.max_status_checks_per_cycle` |
+| **事件所属会话已经不存在** | **ack 掉、不唤醒**：`session retention = delete` 的定时任务一轮跑完即删会话，而它在删掉前几秒已经发过 `awaiting_user`；那轮本身由任务台账（`taskruns.py`）看着。事件进 `handled.jsonl`（可审计），日志写明会话数与 id | `bin/decide.py` 的 `session_states()`、`bin/selftest_decide.py` |
 | low 事件 | 只有**新** low 事件才唤醒（`has_new_pending`），另受抖动闸限制，最坏延迟 `config.low_wake_minutes` | `bin/decide.py`、`bin/selftest_decide.py` |
 | **用户正在这条会话里连续对话** | `awaiting_user` 且 `questionLike=false`、该会话在 `active_user_quiet_minutes` 内有 ≥ `active_user_min_run` 次 `completed` run → **ack 掉、不唤醒**（事件进 `handled.jsonl`，日志写明原因与 run 数）；**提问一律不抑制** | `bin/decide.py` 的 `active_user_suppressed()`、`config.active_user_quiet_minutes/min_run` |
 | 心跳 | **空闲不发**、**没有新事件也不发**：`pending` 里出现上次唤醒未见过的 id 才唤醒 | `config.skip_idle_heartbeat`、`has_new_pending()` |
@@ -40,6 +41,19 @@ run 数，不唤醒。
 
 - **`questionLike` 为真、或字段缺失 → 一律不抑制**：他真在问的时候叫醒我是这条规则存在的理由；
   字段读不到是「未知」，不能当「没在问」。
+
+## 一条事件指向一个已消失的会话
+
+`session retention = delete` 的任务（本部署多数定时任务如此）跑完就把会话删掉，而删掉前几秒它已经
+发出过一条 `awaiting_user`。醒来一看是 `Session not found`，只能手打一个 ack——实测一夜间四条这样的事件各买
+了一次空转的唤醒。
+
+判据不是猜名字，而是**问一句还在不在**：`session status` 回 rc≠0 且输出里有 `not found` ⇒ 这条会话没了，
+事件无法被回答也无处推进 ⇒ ack 退休（落 `handled.jsonl`）并记日志。
+
+- **不可读 ≠ 不存在**：`agent.sock` 连不上之类的 rc≠0 仍然照旧唤醒。读不到状态时保持警觉是安全方向，
+  把一次 agent 抖动变成静默才是危险的那边。
+- 这条与「用户正在对话」不同：那条的前提是会话还活着并在等他，这条的前提是会话已经没了。
 - run 数靠一次 `transcript --runs` 加（必要时）一次尾部条目（`--truncate 1`，只读时间戳与 run id），
   同样受 `max_status_checks_per_cycle` 约束；超出上限的会话照旧唤醒。
 - 任一阈值设 0 = 关掉这条抑制。行为钉在 `bin/selftest_decide.py`，接线（配置键、`questionLike`
