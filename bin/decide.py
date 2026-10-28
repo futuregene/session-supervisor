@@ -16,6 +16,7 @@ import time
 
 WATCH = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PENDING = os.path.join(WATCH, "inbox", "pending.jsonl")
+HANDLED = os.path.join(WATCH, "inbox", "handled.jsonl")
 WAKES = os.path.join(WATCH, "state", "wakes.jsonl")
 PENDING_SEEN = os.path.join(WATCH, "state", "pending_seen.json")
 PAYLOAD = os.path.join(WATCH, "state", "turn_payload.json")
@@ -137,6 +138,136 @@ def has_new_pending(pending_ids, seen_ids):
     """
     return bool({str(i) for i in (pending_ids or []) if i}
                 - {str(i) for i in (seen_ids or []) if i})
+
+
+# ── "the user is talking in that session right now" ─────────────────────────
+# A session that stops with a non-question `awaiting_user` event is not news while the
+# user is mid-conversation: every stop is just the end of *his* turn, and a wake for it
+# can only conclude "nothing to answer, do nothing" and then ack. Measured 2026-10-28:
+# one session in ordinary back-and-forth (19 completed runs, 5–10 min apart) fired a
+# *fresh* `awaiting_user` id after every turn, so `has_new_pending` saw news each time
+# and the gate woke 5 turns in 75 minutes for nothing. That is the general shape, not
+# one session: "stopped and waiting" is what every session does between turns.
+# Two properties together identify *this* session, so the rule cannot silence one that
+# is really waiting for a user who walked away:
+#   * several completed runs inside a short window — a live conversation, not a session
+#     left sitting with one old run;
+#   * a stop that does not ask for a decision (`questionLike` false) — a session that
+#     really asks him something must still wake us (that is the whole point of waking).
+# `streaming_sessions` already covers "a turn is running right now"; this covers "no
+# turn is running because he is thinking between turns".
+# Knobs live in bin/config.json (`active_user_quiet_minutes` / `active_user_min_run`);
+# 0 disables either one. The values here are only what an absent key means.
+DEFAULT_ACTIVE_QUIET_MINUTES = 30
+DEFAULT_ACTIVE_MIN_RUN = 2
+# Display entries to read back per session. Only timestamps and run ids are wanted
+# (`--truncate 1`), so this costs a few KB; 40 entries covers ~10 short back-and-forth
+# runs, and a session busier than that inside the window is a conversation anyway.
+TAIL_ENTRIES = 40
+
+
+def count_completed_runs(entries, cutoff_ms):
+    """Distinct runs in `entries` that completed at or after `cutoff_ms`.
+
+    Counted by run id, never by entry: one run leaves several entries (its text, its
+    tool calls, their results), so counting entries would call a single busy turn "the
+    user is chatting". The run's own `status` comes with each entry, which is what
+    makes `completed` checkable here — the run ledger (`transcript --runs`) reports
+    status but no timestamps, and entries report timestamps.
+    """
+    latest = {}
+    for e in entries or ():
+        rid = e.get("runId")
+        if not rid:
+            continue
+        ts = int(e.get("createdAtMs") or 0)
+        prev = latest.get(rid)
+        if prev is None or ts >= prev[0]:
+            latest[rid] = (ts, (e.get("run") or {}).get("status"))
+    return sum(1 for ts, status in latest.values()
+               if status == "completed" and ts >= int(cutoff_ms))
+
+
+def recent_completed_runs(cfg, sid, now=None, quiet_minutes=DEFAULT_ACTIVE_QUIET_MINUTES):
+    """How many completed runs of `sid` ended within `quiet_minutes`. None = unknown.
+
+    Unknown is returned, never guessed to 0 *or* to "lots": the caller keeps the
+    ordinary behaviour on None, because waking once too often is cheap and staying
+    silent about a session that is really waiting is not. Costs at most two `future`
+    calls (and one when the ledger already shows fewer than two completed runs at all,
+    which is every genuinely idle session):
+
+      * `transcript --runs` — total entries and each run's outcome;
+      * `transcript --cursor <total-40> --truncate 1` — the tail entries, which carry
+        `createdAtMs` and their run id.
+    """
+    now = time.time() if now is None else float(now)
+    rc, out, _ = future(cfg, ["session", "transcript", "--session", sid, "--runs", "--json"],
+                        timeout=25)
+    if rc != 0:
+        return None
+    try:
+        d = json.loads(out)
+        total = int(d.get("scannedEntries") or 0)
+        completed = sum(1 for r in (d.get("ledger") or []) if r.get("status") == "completed")
+    except Exception:  # noqa: BLE001
+        return None
+    if total <= 0 or completed < 1:
+        return 0
+    cursor = max(0, total - TAIL_ENTRIES)
+    rc, out, _ = future(cfg, ["session", "transcript", "--session", sid,
+                              "--cursor", str(cursor), "--limit", str(min(TAIL_ENTRIES, total - cursor)),
+                              "--truncate", "1", "--json"], timeout=25)
+    if rc != 0:
+        return None
+    try:
+        entries = json.loads(out).get("entries") or []
+    except Exception:  # noqa: BLE001
+        return None
+    return count_completed_runs(entries, cutoff_ms=int((now - float(quiet_minutes) * 60) * 1000))
+
+
+def active_user_suppressed(cfg, pending, now=None):
+    """(event ids to ack, detail) for stops the user is actively answering himself.
+
+    Only `awaiting_user` events whose `questionLike` is exactly `False`: a missing
+    field is *unknown*, not "not a question", and an unknown must keep waking us — the
+    quiet path is the one that cannot be noticed when it is wrong.
+
+    Sessions are capped by `max_status_checks_per_cycle`, the same budget
+    `streaming_sessions` spends, because both are "one or two `future` subprocesses per
+    session" work done inside one scan cycle; without it a busy inbox would turn this
+    into the new cost. Sessions past the cap keep today's behaviour (they wake).
+    """
+    quiet_minutes = float(cfg.get("active_user_quiet_minutes", DEFAULT_ACTIVE_QUIET_MINUTES))
+    min_run = int(cfg.get("active_user_min_run", DEFAULT_ACTIVE_MIN_RUN))
+    if quiet_minutes <= 0 or min_run <= 0:
+        # Documented in docs/throttle-and-budget.md: 0 means "never suppress this way",
+        # which is louder than a rule nobody can find the off switch for.
+        return [], ""
+    cands = [e for e in pending
+             if e.get("kind") == "awaiting_user"
+             and e.get("sessionId")
+             and (e.get("detail") or {}).get("questionLike") is False]
+    if not cands:
+        return [], ""
+    sids = list(dict.fromkeys(e["sessionId"] for e in cands))
+    cap = int(cfg.get("max_status_checks_per_cycle", 8))
+    if len(sids) > cap:
+        log(f"{len(sids)} sessions have a non-question awaiting_user event; only the "
+            f"first {cap} were checked for an active conversation")
+    quiet = {}
+    for sid in sids[:cap]:
+        runs = recent_completed_runs(cfg, sid, now=now, quiet_minutes=quiet_minutes)
+        if runs is None:
+            log(f"active-user check {sid[:8]}: transcript unreadable; waking as before")
+            continue
+        if runs >= min_run:
+            quiet[sid] = runs
+    ids = [e.get("id") for e in cands if e.get("sessionId") in quiet and e.get("id")]
+    detail = ", ".join(f"{sid[:8]}={runs} completed run(s) in {int(quiet_minutes)}min"
+                       for sid, runs in quiet.items())
+    return ids, detail
 
 
 def name_heal_needed(status, want, max_runs=1):
@@ -272,6 +403,27 @@ def main():
         subprocess.run([py, os.path.join(WATCH, "bin", "inbox.py"), "ack"] + suppressed,
                        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30)
         log(f"guard-suppressed {len(suppressed)} event(s) in {len(blocked)} session(s); acked")
+
+    # ── the user is in that conversation right now ───────────────────────────
+    # Unlike the deferral above, this *retires* the events: once the user has answered,
+    # the stop they reported was the end of his own turn and there is nothing to
+    # reconcile. Acked through `inbox.ack` so the events land in handled.jsonl with
+    # their timestamp — a suppression nobody can audit afterwards is indistinguishable
+    # from a bug. A failure to ack wakes as before (the events are still pending, so
+    # the ordinary path applies): never silence on a half-done bookkeeping step.
+    quiet_ids, quiet_detail = active_user_suppressed(cfg, pending, now=now)
+    if quiet_ids:
+        try:
+            moved, _kept = inbox_mod.ack(quiet_ids, pending_path=PENDING, handled_path=HANDLED,
+                                         now_ms=int(now * 1000))
+        except Exception as exc:  # noqa: BLE001
+            log(f"active-user suppression could not ack ({type(exc).__name__}: {exc}); not suppressing")
+        else:
+            gone = {m.get("id") for m in moved}
+            pending = [e for e in pending if e.get("id") not in gone]
+            log(f"active-user-suppressed {len(moved)} awaiting_user event(s) "
+                f"({quiet_detail}); the user is mid-conversation, acked, not waking")
+
     wakes = read_jsonl(WAKES)
     last_ts = max([float(w.get("ts") or 0) for w in wakes], default=0.0)
     hour_ago, day_ago = now - 3600, now - 86400

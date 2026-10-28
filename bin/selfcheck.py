@@ -103,6 +103,44 @@ def check_decide_selftest() -> tuple[bool, str]:
     return p.returncode == 0, (tail[-1] if tail else f"exit {p.returncode}")
 
 
+def check_active_user_quiet() -> tuple[bool, str]:
+    """The "user is mid-conversation" rule is wired to its four ends.
+
+    It silences a wake, so every one of its four ends being present is what makes the
+    silence reviewable: the two knobs in `bin/config.json` (not literals inside the
+    rule), the `questionLike` signal `scan.py` puts on the event (the safety valve —
+    a session really asking something must keep waking us), and the ack through
+    `inbox.ack` (so a suppressed event lands in handled.jsonl instead of vanishing).
+    Losing any one of them turns a rule into an opinion. `selftest_decide.py` pins the
+    behaviour; this pins the wiring that behaviour depends on.
+    """
+    problems = []
+    try:
+        cfg = json.load(open(os.path.join(ROOT, "bin", "config.json"), encoding="utf-8"))
+    except Exception as exc:  # noqa: BLE001
+        return False, f"bin/config.json unreadable: {exc}"
+    quiet = cfg.get("active_user_quiet_minutes")
+    runs = cfg.get("active_user_min_run")
+    if not isinstance(quiet, (int, float)) or quiet <= 0:
+        problems.append("bin/config.json: active_user_quiet_minutes missing or off")
+    if not isinstance(runs, int) or runs < 1:
+        problems.append("bin/config.json: active_user_min_run missing or off")
+    decide_src = open(os.path.join(ROOT, "bin", "decide.py"), encoding="utf-8").read()
+    scan_src = open(os.path.join(ROOT, "bin", "scan.py"), encoding="utf-8").read()
+    if 'cfg.get("active_user_quiet_minutes"' not in decide_src:
+        problems.append("bin/decide.py does not read active_user_quiet_minutes from config")
+    if 'cfg.get("active_user_min_run"' not in decide_src:
+        problems.append("bin/decide.py does not read active_user_min_run from config")
+    if '"questionLike"' not in scan_src:
+        problems.append("bin/scan.py no longer records questionLike (the safety valve loses its input)")
+    if "inbox_mod.ack(" not in decide_src:
+        problems.append("bin/decide.py retires events without inbox.ack (unauditable suppression)")
+    if '"questionLike") is False' not in decide_src:
+        problems.append("bin/decide.py no longer requires questionLike to be exactly False")
+    return (not problems), ("; ".join(problems) if problems
+                            else f"knobs {quiet}min/{runs} runs, questionLike read, ack auditable")
+
+
 def check_inbox_selftest() -> tuple[bool, str]:
     """One live event per (session, kind) — and the folded ones are recorded.
 
@@ -663,6 +701,7 @@ CHECKS = [
     ("relay format", check_relay_format),
     ("scan selftest", check_scan_selftest),
     ("decide selftest", check_decide_selftest),
+    ("active-user quiet wiring", check_active_user_quiet),
     ("inbox fold selftest", check_inbox_selftest),
     ("prompt split", check_prompt_split),
     ("notice/directives selftest", check_notice_selftest),

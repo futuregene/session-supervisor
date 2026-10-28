@@ -65,6 +65,8 @@ runbooks/supervisor-daemon.md）——只负责让下一行一直活着
 | `task_review` | medium | 定时任务已积累 N 轮未复盘 | 读 `taskruns.py digest`，改就改提示词，最后 `reviewed <id>` |
 
 同一会话同一状态只报一次（去重键含事件类型、时间戳与 ordinal，见 `scan.py::emit`）。
+`awaiting_user` 在**唤醒之前**还多一道闸：非提问且该会话正在被用户连续使用（窗口内多次 completed run）→
+事件被 ack、不唤醒（判据与失效方式见 [throttle-and-budget.md](throttle-and-budget.md)）。
 `task_*` 三类来自 `taskruns.py`：**无会话可看**（任务跑完即删会话），按 run id 去重，任务第一次被看见时只建基线。
 
 ## 派单前先查重

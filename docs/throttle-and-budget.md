@@ -21,12 +21,29 @@
 | high/medium 事件 | 立刻唤醒，只受最小间隔约束 | `bin/decide.py`、`NOTIFY_PRIORITY` |
 | **事件所属会话正在跑** | **不作为唤醒理由**：`awaiting_user` 的前提（已停下等回复）在用户回一句后就失效，此刻也发不出消息（只会排队）。事件**不 ack、留在 pending**，会话空闲后下一轮照常唤醒 | `bin/decide.py` 的 `streaming_sessions()`、`config.max_status_checks_per_cycle` |
 | low 事件 | 只有**新** low 事件才唤醒（`has_new_pending`），另受抖动闸限制，最坏延迟 `config.low_wake_minutes` | `bin/decide.py`、`bin/selftest_decide.py` |
+| **用户正在这条会话里连续对话** | `awaiting_user` 且 `questionLike=false`、该会话在 `active_user_quiet_minutes` 内有 ≥ `active_user_min_run` 次 `completed` run → **ack 掉、不唤醒**（事件进 `handled.jsonl`，日志写明原因与 run 数）；**提问一律不抑制** | `bin/decide.py` 的 `active_user_suppressed()`、`config.active_user_quiet_minutes/min_run` |
 | 心跳 | **空闲不发**、**没有新事件也不发**：`pending` 里出现上次唤醒未见过的 id 才唤醒 | `config.skip_idle_heartbeat`、`has_new_pending()` |
 | 存活响声 | 即使一直没有新事件，也每隔 `liveness_minutes` 醒一次，避免长静默变成失联 | `config.liveness_minutes` |
 | 单回合外发 | 会话数与工具调用数双上限 | `prompts/turn.md`、`config.max_messages_per_turn` |
 | 同会话外发 | 时间窗与每日上限，`bin/guard.py` 计数 | `config.max_messages_per_session_*` |
 | 扫描深度预算 | 每轮最多深查若干会话，超出 deferred 到下一轮（deferred 的会话不在下一轮被"陈旧"闸门误杀） | `config.max_deep_checks_per_scan`、`bin/scan.py` |
 | 熔断 | 存在 `state/PAUSE` 即不唤醒、不自动批准 | `touch state/PAUSE`（删掉即恢复） |
+
+## 为什么 low 噪音不再买得到价值
+
+每条 `awaiting_user` 都是**新 id**，所以「这条会话停下了」在 `has_new_pending` 眼里永远是新闻；而用户
+正在那条会话里一问一答时，被叫起来的一轮只能得出「没有待答问题、不介入」——**唤醒买到零信息，却照样
+付一个 run**。判据用现有信号区分「他在对话」与「他走开了、只剩一条旧 run」：`questionLike` 为假（不是在
+问他要决定）**且**该会话在 `active_user_quiet_minutes`（默认 30）内有 `active_user_min_run`（默认 2）
+次 `completed` run。命中则 ack（落 `inbox/handled.jsonl`，可事后审计）并在 `logs/decide.log` 写明看到的
+run 数，不唤醒。
+
+- **`questionLike` 为真、或字段缺失 → 一律不抑制**：他真在问的时候叫醒我是这条规则存在的理由；
+  字段读不到是「未知」，不能当「没在问」。
+- run 数靠一次 `transcript --runs` 加（必要时）一次尾部条目（`--truncate 1`，只读时间戳与 run id），
+  同样受 `max_status_checks_per_cycle` 约束；超出上限的会话照旧唤醒。
+- 任一阈值设 0 = 关掉这条抑制。行为钉在 `bin/selftest_decide.py`，接线（配置键、`questionLike`
+  的来源、用 `inbox.ack` 退役）钉在 `bin/selfcheck.py`。
 
 ## goal worker 的两道豁免
 

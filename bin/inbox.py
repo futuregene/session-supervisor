@@ -124,6 +124,37 @@ def write_lines(path, rows):
     os.replace(tmp, path)
 
 
+def ack(ids, pending_path=PENDING, handled_path=HANDLED, all_rows=False, now_ms=None):
+    """Retire events from pending and record them in handled. Returns (moved, kept).
+
+    Exposed as a function (the CLI `ack` branch is one caller) because a *script* has
+    to retire events too: the wake gate retires the ones it concludes nothing needs
+    doing about, and it must do that with the same bookkeeping as a hand-typed
+    `inbox.py ack` — an event that leaves the card without landing in handled.jsonl
+    is an event whose fate nobody can audit.
+
+    Paths are arguments, not module constants, so a caller that owns a different
+    inbox (a selftest with a temp dir) does not ack the live one.
+    """
+    ids = set(ids or ())
+    now = int(now_ms if now_ms is not None else time.time() * 1000)
+    kept, moved = [], []
+    for e in read_lines(pending_path):
+        if all_rows or e.get("id") in ids:
+            rec = dict(e)
+            rec["handledAtMs"] = now
+            moved.append(rec)
+        else:
+            kept.append(e)
+    write_lines(pending_path, kept)
+    if moved:
+        os.makedirs(os.path.dirname(handled_path), exist_ok=True)
+        with open(handled_path, "a", encoding="utf-8") as fh:
+            for e in moved:
+                fh.write(json.dumps(e, ensure_ascii=False) + "\n")
+    return moved, kept
+
+
 def main(argv):
     if not argv:
         print(__doc__)
@@ -182,19 +213,7 @@ def main(argv):
 
     if cmd in ("ack", "ack-all"):
         ids = set() if cmd == "ack-all" else set(a for a in rest if not a.startswith("-"))
-        kept, moved = [], []
-        for e in pending:
-            if cmd == "ack-all" or e.get("id") in ids:
-                e["handledAtMs"] = int(time.time() * 1000)
-                moved.append(e)
-            else:
-                kept.append(e)
-        write_lines(PENDING, kept)
-        if moved:
-            os.makedirs(os.path.dirname(HANDLED), exist_ok=True)
-            with open(HANDLED, "a", encoding="utf-8") as fh:
-                for e in moved:
-                    fh.write(json.dumps(e, ensure_ascii=False) + "\n")
+        moved, kept = ack(ids, all_rows=(cmd == "ack-all"))
         print(f"acked {len(moved)}, {len(kept)} still pending")
         return 0
 

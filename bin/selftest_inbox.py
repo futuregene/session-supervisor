@@ -106,6 +106,29 @@ check("handled.jsonl was not appended again",
       len(open(h, encoding="utf-8").read().strip().splitlines()), 1)
 shutil.rmtree(d, ignore_errors=True)
 
+print("ack retires the given ids only, and records them")
+d = tempfile.mkdtemp(prefix="selftest-inbox-")
+p = os.path.join(d, "pending.jsonl")
+h = os.path.join(d, "handled.jsonl")
+with open(p, "w", encoding="utf-8") as fh:
+    for e in [ev("a1", "awaiting_user", "s1", 1000), ev("a2", "awaiting_user", "s2", 2000),
+              ev("a3", "run_error", "s1", 3000, "high")]:
+        fh.write(json.dumps(e) + "\n")
+moved, kept = inbox.ack({"a1"}, pending_path=p, handled_path=h, now_ms=7)
+check("only the named event is retired", [e["id"] for e in moved], ["a1"])
+check("the rest stay pending", [e["id"] for e in kept], ["a2", "a3"])
+check("pending.jsonl agrees",
+      [json.loads(ln)["id"] for ln in open(p, encoding="utf-8") if ln.strip()], ["a2", "a3"])
+check("the retired event is auditable in handled.jsonl",
+      [(json.loads(ln)["id"], json.loads(ln)["handledAtMs"])
+       for ln in open(h, encoding="utf-8") if ln.strip()], [("a1", 7)])
+inbox.ack(set(), pending_path=p, handled_path=h, all_rows=True, now_ms=8)
+check("ack-all retires everything",
+      [json.loads(ln)["id"] for ln in open(p, encoding="utf-8") if ln.strip()], [])
+check("and appends only what it moved",
+      len(open(h, encoding="utf-8").read().strip().splitlines()), 3)
+shutil.rmtree(d, ignore_errors=True)
+
 print()
 if FAILED:
     print(f"FAILED ({len(FAILED)}):")
