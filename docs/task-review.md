@@ -84,6 +84,10 @@ state 重写一份（`digest(..., task=, runs=, state=)`，不必再联网），
    否则同一件事会被反复请示、每轮都重跑一遍判定。本部署实测的次数与事故经过记在 `.future/memory/`。
    做法：由总管维护一份状态（本部署是 `~/.future/pr-sweep/state.json` 的 `holds` 键：
    `{ref, tip, until, why}`），提示词规定"命中就只写一行、不再升级"。**判据落在状态里，不靠每轮重新推导。**
+   > **只写进 `journal/` 的决定等于没写。** 任务读不到你的日志，它只读 `state`：对某个 `ref` 无论作出
+   > "留着"还是"放弃"的决定，都必须同时落进 `holds`——"留着"= 加一条，"放弃"= 自己执行掉删除、
+   > 再删掉那条 hold。只在一份人类可读的记录里表态，任务下一轮照样把它标成"请示挂起"，
+   > 直到有人重新决定一次；本部署的实测经过见 `journal/`。
 5. **留痕**：`reports/decisions/<日期>.md` 一条（做了什么 / 依据 / 回退 =
    `future task prompt revert <id>`），有必要的用 `future task feedback <run-id> good|bad --note "…"`
    给这一轮打分——台账里那一列空着，复盘就没有历史可用。
