@@ -37,6 +37,7 @@
 | [gotcha-records.md](gotcha-records.md) | 提交与记录之前 |
 | [git-flow.md](git-flow.md) | **要在本仓改文件/开 PR/收尾同步**（必读） |
 | [privacy-and-state.md](privacy-and-state.md) | 决定某文件该不该提交、或处理隐私/运行态 |
+| [proposals/external-event-source.md](proposals/external-event-source.md) | 要决定接不接外部事件源、或实现 `trigger.py` 之前 |
 
 每份的第 3 行是「**何时读**」，用触发场景写——那是决定"要不要打开"的唯一依据。
 `AGENTS.md` §8 不再复述这份表（复述会漂移），只指向这里。
