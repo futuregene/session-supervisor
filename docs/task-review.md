@@ -45,6 +45,9 @@ python3 bin/taskruns.py reviewed <任务id>     # 关掉这一轮：计数归零
 比拒绝更贵——拒绝只花一次重试，假成功要付一整轮复盘。
 （事件 id `evt_task_review_tsk<32位>` 里的 `tsk<32位>` 不是任务 id，别把它的尾巴当参数：
 任务 id 形如 `tsk_<32 位>`，中间有下划线。）
+`list` 打印**完整** id，且 `digest` / `reviewed` 接受**唯一前缀**；前缀不唯一时报歧义而不是挑一个。
+以前 `list` 把 id 截到 20 字符，照抄去 `digest` / `reviewed` 得到的是 `no task matching`，
+而真任务的计数照旧停在原地——记账命令对"没找到的目标"报错还算好的，更贵的是它看起来像 id 抄错了。
 
 `digest` 落在 `state/task-digests/<task-id>.md`，只读、覆盖同一文件。它替你做的是**机械筛选**：
 

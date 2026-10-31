@@ -323,9 +323,14 @@ def cmd_reviewed(rest, cfg, state=None, tasks=None, why="", now_ms=None, say=pri
         say(why)
         return 1
     target = rest[0]
-    task = next((t for t in tasks if target in (t.get("id"), t.get("name"))), None)
+    task, ambiguous = resolve_task(tasks, target)
     if task is None:
         known = ", ".join(f"{t.get('id')} ({t.get('name')})" for t in tasks) or "(none)"
+        if ambiguous:
+            say(f"ambiguous task id prefix {target!r}; it matches "
+                f"{', '.join(ambiguous)}. Give more characters or the full id.\n"
+                f"known tasks: {known}")
+            return 1
         say(f"no task matching {target!r}; reviewed needs a real task id or name.\n"
             f"known tasks: {known}")
         return 1
@@ -333,6 +338,29 @@ def cmd_reviewed(rest, cfg, state=None, tasks=None, why="", now_ms=None, say=pri
     mark_reviewed(tid, state=state, now_ms=now_ms)
     say(f"reviewed: {tid} (counter reset)")
     return 0
+
+
+def resolve_task(tasks, ref):
+    """Find the task a `digest`/`reviewed` argument names.
+
+    Exact id or exact name wins. A *unique* id prefix is accepted too, because the
+    obvious way to get an id is to copy it from `list` — and `list` used to print it
+    truncated, so the copy never matched and the command answered "no task matching"
+    while the real task kept its counter. Ambiguity is reported, never guessed:
+    resolving to the wrong task would reset the wrong counter, which is silent.
+    """
+    ref = (ref or "").strip()
+    if not ref:
+        return None, []
+    for t in tasks:
+        if ref in (t.get("id"), t.get("name")):
+            return t, []
+    prefixed = [t for t in tasks if (t.get("id") or "").startswith(ref)]
+    if len(prefixed) == 1:
+        return prefixed[0], []
+    if len(prefixed) > 1:
+        return None, [t.get("id") for t in prefixed]
+    return None, []
 
 
 def mark_reviewed(task_id, state=None, now_ms=None):
@@ -384,9 +412,11 @@ def digest(task_ref, cfg=None, runs_n=None, out=None, do_print=False,
         tasks, why = fetch_tasks(cfg)
         if why:
             raise SystemExit(why)
-        task = next((t for t in tasks
-                     if task_ref in (t.get("id"), t.get("name"))), None)
+        task, ambiguous = resolve_task(tasks, task_ref)
         if not task:
+            if ambiguous:
+                raise SystemExit(f"ambiguous task id prefix {task_ref!r}; it matches "
+                                 f"{', '.join(ambiguous)}")
             raise SystemExit(f"no task matching {task_ref!r}")
     tid = task["id"]
     rec = (st.get("tasks") or {}).get(tid) or {}
@@ -527,7 +557,9 @@ def main(argv):
             print(json.dumps(rows, ensure_ascii=False, indent=1))
         else:
             for r in rows:
-                print(f"{r['taskId'][:20]} {r['name']} · 未复盘 {r['runsSinceReview']} · "
+                # Print the id whole: the resolver rejects an id that is not the one
+                # in the registry, and a truncated one looks usable but is not.
+                print(f"{r['taskId']} {r['name']} · 未复盘 {r['runsSinceReview']} · "
                       f"连续失败 {r['failureStreak']} · {'待复盘' if r['reviewPending'] else ''}")
             print(f"-- {len(rows)} task(s)")
         return 0
