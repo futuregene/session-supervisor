@@ -48,12 +48,36 @@ def read_lines(path):
 # cannot still be true (a session that stopped again stopped once, and its text is the
 # newest one). Deliberately excluded: `failed_run` / `run_error`, whose detail names a
 # specific run — two failures are two facts, not one state — and both are `high` anyway,
-# so they wake a turn immediately instead of piling up.
-FOLD_KINDS = ("awaiting_user", "new_session", "stalled", "approval_pending")
+# so they wake a turn immediately instead of piling up. `external` is here for the other
+# identity: an outside event is superseded per thread, not per session (see `fold_key`).
+FOLD_KINDS = ("awaiting_user", "new_session", "stalled", "approval_pending", "external")
+
+
+def fold_key(e):
+    """What one event is *about*, for superseding.
+
+    A session event describes the state of one session at a moment, so its identity is
+    `(sessionId, kind)` — a later stop supersedes an earlier one. A session that stopped
+    three times produced three real events, and only the newest premise still holds.
+
+    An external event has no session to be the state of: its identity is `thread_key`,
+    because two comments on one pull request are one conversation, and folding them to one
+    line is what keeps a chatty thread from filling the card. Its `kind` is not part of
+    the key — `external` is the only kind external events carry.
+
+    `None` when the row carries neither identity: it cannot be folded with anything, so it
+    is kept as it is.
+    """
+    thread = e.get("thread_key") or (e.get("detail") or {}).get("thread_key")
+    if thread:
+        return ("thread", thread)
+    if e.get("sessionId") and e.get("kind"):
+        return ("session", e.get("sessionId"), e.get("kind"))
+    return None
 
 
 def fold_superseded(rows, kinds=FOLD_KINDS, now_ms=None):
-    """Split `rows` into (keep, folded): one survivor per (sessionId, kind).
+    """Split `rows` into (keep, folded): one survivor per `fold_key`.
 
     Why fold instead of rendering only the newest line: the user asked exactly that
     (2026-10-16, phone: 「待处理事件一个会话出现了多条，为什么不能只使用最后一条呢」),
@@ -80,21 +104,25 @@ def fold_superseded(rows, kinds=FOLD_KINDS, now_ms=None):
     # during a scan) as the tie-break.
     survivor = {}
     for i, e in enumerate(rows):
-        if e.get("kind") not in kinds or not e.get("sessionId"):
+        if e.get("kind") not in kinds:
             continue
-        key = (e.get("sessionId"), e.get("kind"))
+        key = fold_key(e)
+        if key is None:
+            continue
         prev = survivor.get(key)
         if prev is None or int(e.get("detectedAtMs") or 0) >= int(rows[prev].get("detectedAtMs") or 0):
             survivor[key] = i
     now = int(now_ms if now_ms is not None else time.time() * 1000)
     keep, folded = [], []
     for i, e in enumerate(rows):
-        key = (e.get("sessionId"), e.get("kind"))
-        if key in survivor and survivor[key] != i:
+        key = fold_key(e)
+        if key is not None and key in survivor and survivor[key] != i:
             rec = dict(e)
             rec["handledAtMs"] = now
             rec["foldedInto"] = rows[survivor[key]].get("id")
-            rec["foldedReason"] = "superseded by a later event of the same kind for the same session"
+            rec["foldedReason"] = ("superseded by a later event on the same thread"
+                                   if key[0] == "thread" else
+                                   "superseded by a later event of the same kind for the same session")
             folded.append(rec)
         else:
             keep.append(e)

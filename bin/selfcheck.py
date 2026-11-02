@@ -297,6 +297,19 @@ def check_dispatch_selftest() -> tuple[bool, str]:
     return p.returncode == 0, (tail[-1] if tail else f"exit {p.returncode}")
 
 
+def check_trigger_selftest() -> tuple[bool, str]:
+    """The ingestion path: one fact once, the body off the card, a stranger cannot buy a wake.
+
+    `bin/trigger.py` is the only way an outside app can put something in the inbox, and its
+    promises are the kind that fail silently: a duplicated fact shows as two card lines, a
+    body that reached the card looks like an instruction, and a stranger's `high` priority
+    would spend the event budget. All three are pinned here rather than described.
+    """
+    p = run([sys.executable, os.path.join(ROOT, "bin", "trigger.py"), "--selftest"])
+    tail = (p.stdout or "").strip().splitlines()
+    return p.returncode == 0, (tail[-1] if tail else f"exit {p.returncode}")
+
+
 def check_send_selftest() -> tuple[bool, str]:
     """The timing rule for relays: never send into a session that is mid-run.
 
@@ -709,6 +722,7 @@ CHECKS = [
     ("balance-log selftest", check_balance_log_selftest),
     ("send selftest", check_send_selftest),
     ("dispatch selftest", check_dispatch_selftest),
+    ("trigger selftest", check_trigger_selftest),
     ("roll selftest", check_roll_selftest),
     ("lock selftest", check_lock_selftest),
     ("prune selftest", check_prune_selftest),

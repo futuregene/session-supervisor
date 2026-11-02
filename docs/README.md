@@ -37,7 +37,12 @@
 | [gotcha-records.md](gotcha-records.md) | 提交与记录之前 |
 | [git-flow.md](git-flow.md) | **要在本仓改文件/开 PR/收尾同步**（必读） |
 | [privacy-and-state.md](privacy-and-state.md) | 决定某文件该不该提交、或处理隐私/运行态 |
+| [external-events.md](external-events.md) | 要让外部应用往收件箱放事件、或改 `trigger.py` 的字段之前 |
 | [proposals/external-event-source.md](proposals/external-event-source.md) | 要决定接不接外部事件源、或实现 `trigger.py` 之前 |
+
+> 那份提案是**未立项时的设计**（信任分级、能力上限、限速与验收指标）。已落地的部分（
+> `trigger.py` 的字段、去重、正文与卡分离、折叠）以 [external-events.md](external-events.md) 为准；
+> `action_class` 的引脚闸门仍未实现。
 
 每份的第 3 行是「**何时读**」，用触发场景写——那是决定"要不要打开"的唯一依据。
 `AGENTS.md` §8 不再复述这份表（复述会漂移），只指向这里。

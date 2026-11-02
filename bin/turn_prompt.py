@@ -155,8 +155,17 @@ def triage(watch=WATCH):
     for event, older in one_line_per_session(events):
         prio = event.get("priority") or "low"
         mark = "" if prio == "low" else f" · **{prio}**"
-        line = (f"- `{event.get('id', '?')}` **{event.get('kind', '?')}**{mark}"
-                f" · {event.get('sessionName', '?')} · `{event.get('sessionId', '')}`"
+        # An external event has no session to name: printing its empty id as `` would read
+        # as a missing field. Its label is the source plus the conversation it lives on, and
+        # its `detail.source` says which adapter wrote it.
+        kind = event.get("kind", "?")
+        source = (event.get("detail") or {}).get("source")
+        label = f"{kind} · {source}" if kind == "external" and source else kind
+        where = f" · {event.get('thread_key') or event.get('sessionName', '?')}" \
+            if kind == "external" else f" · {event.get('sessionName', '?')}"
+        if event.get("sessionId"):
+            where += f" · `{event['sessionId']}`"
+        line = (f"- `{event.get('id', '?')}` **{label}**{mark}{where}"
                 f" — {event.get('summary', '')}")
         if older:
             line += (f"（同会话更早 {len(older)} 条同类已折叠："

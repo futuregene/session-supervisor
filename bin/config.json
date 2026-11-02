@@ -40,7 +40,8 @@
     "awaiting_user",
     "new_session",
     "stalled",
-    "approval_pending"
+    "approval_pending",
+    "external"
   ],
   "task_watch_enabled": true,
   "task_watch": [],

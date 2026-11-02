@@ -45,6 +45,7 @@ runbooks/supervisor-daemon.md）——只负责让下一行一直活着
 | `bin/lock.py` | 单飞锁：`acquire` / `release` / `status`（归属于"回合"，非 PID） | `state/agent.lock` |
 | `bin/guard.py` | 防打转：`check <id>` / `record <id> "<note>"` / `show`。**口径以回读 transcript 为准**（`observed_sends()`），`state/sent.jsonl` 只是自己记的、会漏 | `state/sent.jsonl`、`state/observed_sends.json`（180s 缓存） |
 | `bin/send.py` | 唯一的转达通道：抬头、两道闸、额度、待补发队列；`--new` 带 `--accept` 时自动登记派工 | `state/sent.jsonl`、`state/deferred-sends.jsonl`、`state/dispatch.jsonl` |
+| `bin/trigger.py` | **外部事件的唯一入口**：`ingest`（从 stdin 或 `--from` 读一个 JSON 对象：校验 + 按 `dedupe_key` 去重 + 正文落盘）/ `drain <dir>`（适配器只会丢文件时）/ `seen`。它只追加事件，**不唤醒任何人**（见 [external-events.md](external-events.md)） | `inbox/pending.jsonl`、`state/external-seen.jsonl`、`state/external/` |
 | `bin/dispatch.py` | **我开的会话就是我的待办**：`add --session … --accept … [--close-when <spec>]` / `list`（现算 `closable`）/ `close` / `prune`。未关闭的行由 `bin/turn_prompt.py` 渲染进唤醒卡（含验收标准与开了多久） | `state/dispatch.jsonl` |
 | `bin/toolpath.py` | 统一发现 `future` / `python3` 可执行文件 | stdout |
 | `bin/taskruns.py` | 定时任务台账 → 事件：失败/空输出/该复盘了；`digest` 写复盘摘录 | `state/taskruns.json`、`state/task-digests/` |
@@ -82,6 +83,7 @@ runbooks/supervisor-daemon.md）——只负责让下一行一直活着
 | `task_run_failed` | high | 定时任务某一轮非成功结束 | 读错误；可改提示词避免就改，平台侧则记录（见 [task-review.md](task-review.md)） |
 | `task_run_empty` | medium | 定时任务“完成”了但无任何输出 | 查是否被指示“无需动作就不输出” |
 | `task_review` | medium | 定时任务已积累 N 轮未复盘 | 读 `taskruns.py digest`，改就改提示词，最后 `reviewed <id>` |
+| `external` | 按 `trust` 封顶 | 外部应用（GitHub/CI/IM/邮件/脚本）投递的一条事实 | 先按 `detail.payload_ref` 读正文再判断；`action_class=observe` 时只记录；不需要动作就 ack |
 
 同一会话同一状态只报一次（去重键含事件类型、时间戳与 ordinal，见 `scan.py::emit`）。
 `awaiting_user` 在**唤醒之前**还多一道闸：非提问且该会话正在被用户连续使用（窗口内多次 completed run）→
@@ -113,6 +115,8 @@ Windows 编译错误上，后到的那个只能把先到者的提交再验一遍
 | `state/sent.jsonl` | 总管发过消息的记账（guard 写入） |
 | `state/deferred-sends.jsonl` | 等待性拒发（mid-run / 无额度）的待补发队列 |
 | `state/dispatch.jsonl` | 我开的派工：未关闭的行=我欠的跟进，唤醒卡每轮重提（`bin/dispatch.py`）；可选的 `close_when` 让 `list` 现算「能不能关」 |
+| `state/external-seen.jsonl` | 外部事件已接收的 `dedupe_key → id`，只追加；跨进程去重的唯一依据（`bin/trigger.py`） |
+| `state/external/` | 外部事件的全文载荷（`<sha16>.json`），卡上只引用不展开 |
 | `state/approvals.jsonl` | 自动批准的逐条明细 |
 | `state/monitor_session.txt` | 总管会话 id（wake 目标；轮换后由 `monitor_roll.py` 改写） |
 | `state/agent.lock` | 单飞锁（易变，gitignore） |

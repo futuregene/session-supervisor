@@ -1,6 +1,8 @@
 # 提案：外部事件源触发器（trigger.py）
 
-状态：提案，未立项
+状态：**部分落地**——字段、去重、正文与卡分离、按 thread 折叠已实现（`bin/trigger.py`，
+机制见 [../external-events.md](../external-events.md)）；`action_class` 的引脚闸门、直投 worker、回收仍未做。
+本页保留为设计依据（威胁模型、信任分级、限速与验收指标）。
 
 > **何时读**：要决定接不接外部事件源、或实现 `trigger.py` 之前
 
