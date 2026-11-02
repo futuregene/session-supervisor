@@ -45,10 +45,29 @@ runbooks/supervisor-daemon.md）——只负责让下一行一直活着
 | `bin/lock.py` | 单飞锁：`acquire` / `release` / `status`（归属于"回合"，非 PID） | `state/agent.lock` |
 | `bin/guard.py` | 防打转：`check <id>` / `record <id> "<note>"` / `show`。**口径以回读 transcript 为准**（`observed_sends()`），`state/sent.jsonl` 只是自己记的、会漏 | `state/sent.jsonl`、`state/observed_sends.json`（180s 缓存） |
 | `bin/send.py` | 唯一的转达通道：抬头、两道闸、额度、待补发队列；`--new` 带 `--accept` 时自动登记派工 | `state/sent.jsonl`、`state/deferred-sends.jsonl`、`state/dispatch.jsonl` |
-| `bin/dispatch.py` | **我开的会话就是我的待办**：`add --session … --accept …` / `list` / `close` / `prune`。未关闭的行由 `bin/turn_prompt.py` 渲染进唤醒卡（含验收标准与开了多久） | `state/dispatch.jsonl` |
+| `bin/dispatch.py` | **我开的会话就是我的待办**：`add --session … --accept … [--close-when <spec>]` / `list`（现算 `closable`）/ `close` / `prune`。未关闭的行由 `bin/turn_prompt.py` 渲染进唤醒卡（含验收标准与开了多久） | `state/dispatch.jsonl` |
 | `bin/toolpath.py` | 统一发现 `future` / `python3` 可执行文件 | stdout |
 | `bin/taskruns.py` | 定时任务台账 → 事件：失败/空输出/该复盘了；`digest` 写复盘摘录 | `state/taskruns.json`、`state/task-digests/` |
 | `bin/selfcheck.py` | 全部静态探针（= PR 的 CI） | stdout |
+
+## 派工的完成判据（`--close-when`）
+
+`--accept` 是写给人读的一句验收；`--close-when` 是同一件事的机器可判形式，只影响 `list` 的读法：
+
+| spec | 判为 `true` 的条件 | 评估代价 |
+|---|---|---|
+| `pr-merged:<owner>/<repo>#<n>` | 该 PR 已合并（`gh pr view` 的 `state` / `mergedAt`） | 一次 `gh` 往返 |
+| `no-diff:<path>` | 该路径下没有未提交改动（文件或目录；相对路径必须配得上该行的 `--repo`） | 两次本地 `git` |
+| `branch-empty:<branch>` | **不判**：squash 合并后分支提交永远不是基线的祖先，ancestry 会一直说「未合」，一个恒为 `false` 的判据比没有更糟 | 无 |
+
+- 认不出的 spec **原样存下**、判 `unknown` 并给出原因；`add` 不拒绝、不改写。要保留的事实是「当初打算查它」。
+- `list` 现算 `closable: true | false | "unknown"`（JSON 原值；文本列表写成「可关闭 / 未完成 / 未判定」）。
+- **只读**：`gh` 是 GET；`git status` 带 `GIT_OPTIONAL_LOCKS=0`，不会重写索引；台账一个字节都不动。
+- **单条失败不拖垮整份列表**：起不来、超时、仓库不存在 ⇒ 那条 `unknown` + 原因，其余照常输出。
+- **同一目标在一次 `list` 内只查一次**（同一条 PR 的两行只付一次 `gh`）。
+- **没有 spec 的行零开销**：不起子进程。`list` 是常见路径，不能为老行付网络的代价。
+- **唤醒卡不判**：`turn_prompt.py` 只渲染 spec 本身。卡片每轮唤醒都生成，不能每条派工付一次 `gh`；要判就读 `list --json`。
+- **`closable: true` 不关闭任何东西**。`close` 仍是人（或一回合）的显式动作，没有自动关闭，也没有计划加。
 
 ## 事件种类
 
@@ -93,7 +112,7 @@ Windows 编译错误上，后到的那个只能把先到者的提交再验一遍
 | `state/wakes.jsonl` | 每次唤醒的原因与当时待处理数 |
 | `state/sent.jsonl` | 总管发过消息的记账（guard 写入） |
 | `state/deferred-sends.jsonl` | 等待性拒发（mid-run / 无额度）的待补发队列 |
-| `state/dispatch.jsonl` | 我开的派工：未关闭的行=我欠的跟进，唤醒卡每轮重提（`bin/dispatch.py`） |
+| `state/dispatch.jsonl` | 我开的派工：未关闭的行=我欠的跟进，唤醒卡每轮重提（`bin/dispatch.py`）；可选的 `close_when` 让 `list` 现算「能不能关」 |
 | `state/approvals.jsonl` | 自动批准的逐条明细 |
 | `state/monitor_session.txt` | 总管会话 id（wake 目标；轮换后由 `monitor_roll.py` 改写） |
 | `state/agent.lock` | 单飞锁（易变，gitignore） |
