@@ -30,6 +30,11 @@
 5. **自动批准权限请求**（yolo 授权）：由 `bin/approvals.py` 执行（每轮 ≤5、每小时 ≤20），
    逐条记入 `state/approvals.jsonl` 与 `reports/approvals.md`。
 6. **记录**：`journal/`、`reports/on-your-behalf.md`、`reports/needs-you.md`、`reports/approvals.md`。
+6b. **外部事件的 `action_class` 由代码强制，不是提示词**（fail-closed）：从 `bin/trigger.py` 进来的事件带一个
+   能力等级，**只有 `act` 允许发消息或派新会话**；`observe`、`triage`、空值与任何不认识的值一律只读，
+   由 `bin/send.py` / `bin/dispatch.py` 在**任何副作用之前**拒绝（**退出码 6**，不进待补发队列、不建会话、
+   不写台账）。说不清等级时按只读处理；`--event <id>` 让收件箱里的记录说话，与声明矛盾时以记录为准。
+   不带等级的调用是人工路径，行为不变。
 7. **本机诊断**：`future session status`、`future doctor`、看日志、只读代码定位。
 8. **推送 / 开 PR / 合并**（B 档 + "合并也自动"）：可以让某个会话或本仓库把自己的工作分支
    `git push`、`gh pr create`、并**合并该 PR**。**站规：这一整条链不需要用户逐次拍板**——

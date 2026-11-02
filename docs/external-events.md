@@ -61,9 +61,23 @@
 - 唤醒仍由 `decide.py` 判：只有 `high`/`medium` 单独唤醒；`external-unknown` 恒为 `low`，只搭心跳。
 - 卡上每个 `(会话, kind)` 一行；外部事件没有 `sessionId`，所以各自一行，`sessionName` 默认是 `<source>:<source_ref>`。
 
-## 还没做（别当成已经有了）
+## `action_class` 是闸，不是标签
 
-- **`action_class` 只是标签。** `bin/send.py` / `bin/dispatch.py` 还没有 `--action-class` 闸门，所以 `observe` 目前不限制任何动作。那层闸门要动两个脚本的拒绝分支与负向断言，是下一步。
+`observe` / `triage` / 空值 / 任何不认识的值，在 `bin/send.py` 与 `bin/dispatch.py` 里都是**拒绝**：
+
+| 调用 | `act` | 其它任何值（含空、未知） |
+|---|---|---|
+| `send.py <会话> <正文>` | 发送 | 退出码 **6**，一个字节都不写 |
+| `send.py --new …` | 建会话并发送 | 退出码 **6**，**不建会话** |
+| `dispatch.py add …` | 写一行派工 | 退出码 **6**，**不写台账** |
+
+- **fail-closed**：只有精确的 `act` 放行。新类名不会自动成为新权限——适配器发明一个 `auto`，它只会被拒绝。
+- **拒绝时零副作用**：不做会话查询、不进 `state/deferred-sends.jsonl`（那是"暂时发不出去"的队列，不是绕过闸的后门）、不写 guard 台账、不建会话。
+- **记录优先于声明**：`--event <id>` 让收件箱里的记录说话——事件写的是 `observe`，调用方嘴里的 `--action-class act` 会被当成矛盾直接拒绝；收件箱里查不到的 id 也拒绝（无法核对）。
+- **不带这两个参数 = 今天的行为**：人工派单（没有事件来源）与既有拒绝语义（会话忙 3、goal worker 4、只知悉 5）一个字都没变；闸只加在它们**前面**。
+- `close` / ack **不受闸限制**：记录发生过什么，正是只读事件允许产生的结果。
+
+## 还没做（别当成已经有了）
 - 没有把 `thread_key` 与 `dispatch.jsonl` 的会话对上做"直投 worker"。
 - `state/external-seen.jsonl` 与 `state/external/` 没有回收，长期只会变大。
 - 并发：同一个 `dedupe_key` 被两个适配器同时投递时，可能各追加一行（**id 相同**，折叠会并成一条）。这是刻意不引入锁的取舍——加锁会让一个卡住的适配器拖住所有投递。

@@ -32,6 +32,13 @@ creating the session is this script's job precisely because a brand-new session 
 in the session list yet, and resolving its cwd is the one step that needs the agent.
 
   send.py <session-id> <text-file> [--timeout 1800] [--note "..."] [--wait] [--force]
+
+The one gate that comes from outside: an event from `bin/trigger.py` carries an
+`action_class`, and only `act` may write. Pass `--action-class act` (or `--event <id>`,
+which reads the class from the inbox record and cannot be talked around) for a send that
+belongs to such an event; `observe`, `triage`, an empty or an unknown value is refused
+with exit 6 and no side effect at all — no session, no deferred row, no guard record.
+A send with neither flag is the manual path and behaves exactly as it always did.
 """
 import datetime
 import json
@@ -353,6 +360,79 @@ def parse_opt(argv, flag, default=""):
 DEFERRED_PATH = os.path.join(WATCH, "state", "deferred-sends.jsonl")
 DEFERRED_TTL_HOURS = 24
 
+# ── action_class: the one gate an outside event cannot talk its way past ──────
+# An external event (see `docs/external-events.md`) carries `action_class`: what the
+# turn it woke may do. A label nobody enforces is not a boundary, so this is where it
+# binds: only `act` writes. Fail-closed on the value — `observe`, `triage`, an empty
+# value and a value this build has never seen are all refusals, because a class an
+# adapter invents must not become a permission by default. No flag at all is the
+# manual path (a relay the user asked for, with no event behind it) and keeps today's
+# behaviour exactly.
+ACTION_FLAG = "--action-class"
+ACTION_WRITE = "act"
+#: Refusal because of the action class. Distinct from 1/2/3/4/5 so a caller can tell
+#: "this event may not write" from "the target is busy" or "there is no cwd".
+EXIT_ACTION = 6
+
+
+def event_action(event_id):
+    """The `action_class` the inbox recorded for that event; None when it is not there.
+
+    Read from the inbox rather than trusted from the command line: an agent persuaded
+    by a comment can type `--action-class act`, but it cannot change what
+    `bin/trigger.py` recorded when the event was accepted. `handled.jsonl` is searched
+    too, because an event is normally acked before the turn acts on it.
+    """
+    import inbox
+    for path in (inbox.PENDING, inbox.HANDLED):
+        for row in inbox.read_lines(path):
+            if row.get("id") == event_id:
+                return (row.get("detail") or {}).get("action_class")
+    return None
+
+
+def opt_value(argv, flag, default=None):
+    """`--flag <value>`, `default` when the flag is absent, `""` when it has no value.
+
+    `parse_opt` above raises IndexError for a trailing flag; a gate must not crash into
+    a traceback when what it is judging is a malformed call.
+    """
+    if flag not in argv:
+        return default
+    index = argv.index(flag)
+    return argv[index + 1] if index + 1 < len(argv) else ""
+
+
+def action_refusal(action, event_id=None):
+    """One sentence when this call may not write; None when it may.
+
+    `action` is the declared class, or None when the flag was absent; an empty string
+    is a value like any other and is refused. `event_id` (from `--event`) makes the
+    inbox the authority: its record decides, an id the inbox has never seen is refused
+    because it cannot be checked, and a flag contradicting the record is refused
+    rather than believed.
+    """
+    if event_id:
+        recorded = event_action(event_id)
+        if recorded is None:
+            return (f"refused: --event {event_id} is in neither the pending nor the handled "
+                    f"inbox, so its action_class cannot be checked (exit {EXIT_ACTION}, "
+                    "nothing written)")
+        if action is not None and action != recorded:
+            return (f"refused: --action-class {action!r} contradicts the event record "
+                    f"({event_id} says {recorded!r}); the record wins (exit "
+                    f"{EXIT_ACTION}, nothing written)")
+        action = recorded
+    if action is None:
+        return None
+    if action != ACTION_WRITE:
+        detail = f" (event {event_id})" if event_id else ""
+        return (f"refused: action_class={action!r} is read-only{detail}. Only "
+                f"{ACTION_WRITE!r} may send a message or open a session; an outside event "
+                "at this class can only be acked, recorded in journal/, or escalated "
+                f"through bin/notice.py (exit {EXIT_ACTION}, nothing written)")
+    return None
+
 
 def defer(sid, text_file, note, reason):
     """Queue a refused relay so the next wake actually retries it.
@@ -471,12 +551,19 @@ def main_new(argv):
     name = parse_opt(argv, "--name")
     note = parse_opt(argv, "--note")
     accept = parse_opt(argv, "--accept")
+    # Refused before anything exists: `--new` is the write that costs the most (a new
+    # session starts running), so the class is checked before `session new`.
+    refusal = action_refusal(opt_value(argv, ACTION_FLAG), opt_value(argv, "--event"))
+    if refusal:
+        print(refusal)
+        return EXIT_ACTION
     # Every flag that takes a value must be listed here: an unlisted value stays in
     # `positional`, so `--accept "its test passes"` would have been taken as the
     # body file whenever it was written before it (found while dispatching the
     # first tracked session, 2026-10-25).
     known = {"--new", "--cwd", repo_cwd, "--name", name, "--note", note,
-             "--accept", accept}
+             "--accept", accept, ACTION_FLAG, opt_value(argv, ACTION_FLAG) or "",
+             "--event", opt_value(argv, "--event") or ""}
     positional = [a for a in argv if a not in known and not a.startswith("--")]
     if not positional:
         print("usage: send.py --new --cwd <repo> [--name <title>] [--accept \"<what closes it>\"] "
@@ -625,7 +712,15 @@ def main(argv):
     if "--intent" in argv:
         intent = argv[argv.index("--intent") + 1]
 
-    # The awareness gate runs first and touches nothing: no session lookup, no
+    # The action gate runs before everything else that could touch the target: no
+    # session lookup, no guard record, no deferred row, no send budget. An outside
+    # event's `observe` must be a dead end, not a slow path.
+    refusal = action_refusal(opt_value(argv, ACTION_FLAG), opt_value(argv, "--event"))
+    if refusal:
+        print(refusal)
+        return EXIT_ACTION
+
+    # The awareness gate comes next and also touches nothing: no session lookup, no
     # guard record, no send budget. Refusing *is* the point — the target has
     # nothing to do, so the message must not become a run in its context.
     text = frame(open(text_file, encoding="utf-8").read(), sid, note, intent)

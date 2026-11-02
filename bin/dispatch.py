@@ -45,6 +45,14 @@ So a dispatch row carries what a wake needs to judge it:
 this field only puts the judgement in front of whoever is reading instead of in their memory.
 There is no auto-close behind it and no plan for one.
 
+**`add` is gated by `action_class`.** An event from `bin/trigger.py` carries one, and only
+`act` may open work: `--action-class act` (or `--event <id>`, which reads the class from the
+inbox record and cannot be argued around) is required for a dispatch that belongs to such an
+event. `observe`, `triage`, an empty or an unknown value is refused with exit 6 and no row
+written. A call with neither flag is the manual path and behaves exactly as it always did.
+Closing and acking are never gated: recording what happened is exactly what a read-only
+event is allowed to produce.
+
 Rows are append-only; `close` appends a tombstone row with the same session, and `open_rows`
 takes the last row per session. That keeps the file a log (auditable, and a mis-close is one
 more row away) instead of a mutable table that can be corrupted by two writers.
@@ -62,6 +70,47 @@ import datetime
 import json
 import os
 import sys
+
+# The action gate, spelled the same way as in `bin/send.py` (that file carries the long
+# reasoning): only `act` writes, everything else — `observe`, `triage`, an empty value, a
+# value this build has never seen — is refused before anything is written.
+ACTION_WRITE = "act"
+#: Refusal because of the action class, distinct from 1 (unknown row) and 2 (bad usage).
+EXIT_ACTION = 6
+
+
+def event_action(event_id):
+    """The `action_class` the inbox recorded for that event; None when it is not there."""
+    import inbox
+    for path in (inbox.PENDING, inbox.HANDLED):
+        for row in inbox.read_lines(path):
+            if row.get("id") == event_id:
+                return (row.get("detail") or {}).get("action_class")
+    return None
+
+
+def action_refusal(action, event_id=None):
+    """One sentence when this call may not open work; None when it may (see send.py)."""
+    if event_id:
+        recorded = event_action(event_id)
+        if recorded is None:
+            return (f"refused: --event {event_id} is in neither the pending nor the handled "
+                    f"inbox, so its action_class cannot be checked (exit {EXIT_ACTION}, "
+                    "nothing written)")
+        if action is not None and action != recorded:
+            return (f"refused: --action-class {action!r} contradicts the event record "
+                    f"({event_id} says {recorded!r}); the record wins (exit "
+                    f"{EXIT_ACTION}, nothing written)")
+        action = recorded
+    if action is None:
+        return None
+    if action != ACTION_WRITE:
+        detail = f" (event {event_id})" if event_id else ""
+        return (f"refused: action_class={action!r} is read-only{detail}. Only "
+                f"{ACTION_WRITE!r} may open work; an event at this class can be acked, "
+                "recorded in journal/, or escalated through bin/notice.py "
+                f"(exit {EXIT_ACTION}, nothing written)")
+    return None
 
 WATCH = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PATH = os.path.join(WATCH, "state", "dispatch.jsonl")
@@ -418,6 +467,12 @@ def main(argv):
                        help="what result lets this row be closed")
     p_add.add_argument("--repo", default="")
     p_add.add_argument("--note", default="")
+    p_add.add_argument("--action-class", default=None,
+                       help="the class of the event this dispatch belongs to; only `act` may "
+                            "open work (see bin/send.py). Refused with exit 6 otherwise")
+    p_add.add_argument("--event", default=None,
+                       help="id of the inbox event this dispatch answers; its recorded class "
+                            "decides, and an id the inbox does not know is refused")
     p_add.add_argument("--close-when", default=None,
                        help="machine-checkable completion criterion, stored verbatim and judged "
                             "by `list`: pr-merged:<owner>/<repo>#<n> or no-diff:<path>; anything "
@@ -441,6 +496,10 @@ def main(argv):
         return selftest()
 
     if args.cmd == "add":
+        refusal = action_refusal(args.action_class, args.event)
+        if refusal:
+            print(refusal, file=sys.stderr)
+            return EXIT_ACTION
         try:
             row = add(args.session, args.title, args.accept, args.repo, args.note,
                       path=args.path, close_when=args.close_when)
@@ -619,7 +678,44 @@ def selftest():
         add("s11", "t", "a", path=path, close_when="pr-merged:o/r#7")
         assert close("s11", "done", path=path)["close_when"] == "pr-merged:o/r#7"
 
-        # 8. Evaluating is read-only: the ledger's bytes and mtime survive it.
+        # 8. `add` is gated by action_class: only `act` may open work, and a refusal
+        #    writes nothing. `close` is not gated — recording an outcome is exactly what
+        #    a read-only event is allowed to produce.
+        gated = os.path.join(tmp, "gated.jsonl")
+        for value in ("observe", "triage", "auto", ""):
+            code = main(["--path", gated, "add", "--session", "s", "--accept", "a",
+                         "--action-class", value])
+            assert code == EXIT_ACTION, (value, code)
+            assert not os.path.exists(gated), f"{value} wrote the ledger"
+        assert main(["--path", gated, "add", "--session", "s", "--accept", "a"]) == 0, \
+            "no flag is the manual path and must still work"
+        assert len(read(gated)) == 1, read(gated)
+        assert main(["--path", gated, "add", "--session", "s2", "--accept", "a",
+                     "--action-class", "act"]) == 0
+        assert len(read(gated)) == 2, read(gated)
+
+        # The inbox record wins over what the caller typed.
+        import inbox as inbox_mod
+        saved = (inbox_mod.PENDING, inbox_mod.HANDLED)
+        inbox_mod.PENDING = os.path.join(tmp, "inbox-pending.jsonl")
+        inbox_mod.HANDLED = os.path.join(tmp, "inbox-handled.jsonl")
+        with open(inbox_mod.PENDING, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps({"id": "ev_observe", "kind": "external",
+                                 "detail": {"action_class": "observe"}}) + "\n")
+        with open(inbox_mod.HANDLED, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps({"id": "ev_act", "kind": "external",
+                                 "detail": {"action_class": "act"}}) + "\n")
+        assert action_refusal("act", "ev_observe") is not None, "a claimed act must not override"
+        assert action_refusal(None, "ev_observe") is not None
+        assert action_refusal(None, "ev_missing") is not None
+        assert action_refusal(None, "ev_act") is None
+        assert action_refusal("observe", "ev_act") is not None, "a contradiction is refused"
+        assert main(["--path", gated, "add", "--session", "s3", "--accept", "a",
+                     "--event", "ev_observe"]) == EXIT_ACTION
+        assert len(read(gated)) == 2, "a refused --event add must not write"
+        inbox_mod.PENDING, inbox_mod.HANDLED = saved
+
+        # 9. Evaluating is read-only: the ledger's bytes and mtime survive it.
         ledger = os.path.join(tmp, "readonly.jsonl")
         add("r1", "t", "a", path=ledger, close_when="pr-merged:o/r#7")
         add("r2", "t", "a", path=ledger)

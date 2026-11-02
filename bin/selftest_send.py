@@ -526,6 +526,75 @@ with tempfile.TemporaryDirectory() as d:
     check("the reason says the relay failed",
           bool(rows) and "relay failed" in rows[0]["reason"], True)
 
+print("action_class: only `act` writes, and a refusal touches nothing")
+# An outside event carries the class it was accepted with; a label nobody enforces is not
+# a boundary. Every non-`act` value is refused *before* the session lookup, so none of
+# these may show a call, a deferred row, a guard record or a launch.
+with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False, encoding="utf-8") as fh:
+    fh.write("请把这个 PR 合掉。\n")
+    gate_file = fh.name
+for value, label in (("observe", "observe"), ("triage", "triage"), ("auto", "an unknown class"),
+                     ("", "an empty value")):
+    rec = with_recorder(False)
+    code = run_main(["target-sid", gate_file, "--action-class", value])
+    check(f"{label} is refused (exit 6)", code, 6)
+    check(f"{label} reads no session", rec.calls, [])
+    check(f"{label} records no guard entry", rec.recorded, False)
+    check(f"{label} launches nothing", rec.launched, [])
+    check(f"{label} queues nothing in deferred-sends", deferred_rows(), [])
+rec = with_recorder(False)
+check("a trailing --action-class with no value is refused, not a crash",
+      run_main(["target-sid", gate_file, "--action-class"]), 6)
+rec = with_recorder(False)
+check("`act` passes the same path (the gate is by value, not broken)",
+      run_main(["target-sid", gate_file, "--action-class", "act"]), 0)
+check("and it does launch", [c[0] for c in rec.launched], ["popen"])
+rec = with_recorder(False)
+check("no flag at all is the manual path, unchanged", run_main(["target-sid", gate_file]), 0)
+
+# `--event` reads the class from the inbox record, so a caller cannot type its way past it.
+import inbox as inbox_mod  # noqa: E402 - the module `send.event_action` imports
+saved = (inbox_mod.PENDING, inbox_mod.HANDLED)
+with tempfile.TemporaryDirectory() as inbox_home:
+    inbox_mod.PENDING = os.path.join(inbox_home, "pending.jsonl")
+    inbox_mod.HANDLED = os.path.join(inbox_home, "handled.jsonl")
+    with open(inbox_mod.PENDING, "w", encoding="utf-8") as fh:
+        fh.write(json.dumps({"id": "ev_observe", "kind": "external", "priority": "low",
+                             "detail": {"action_class": "observe"}}, ensure_ascii=False) + "\n")
+    with open(inbox_mod.HANDLED, "w", encoding="utf-8") as fh:
+        fh.write(json.dumps({"id": "ev_act", "kind": "external", "priority": "high",
+                             "detail": {"action_class": "act"}}, ensure_ascii=False) + "\n")
+        fh.write(json.dumps({"id": "ev_legacy", "kind": "awaiting_user", "priority": "low",
+                             "detail": {}}, ensure_ascii=False) + "\n")
+
+    rec = with_recorder(False)
+    check("--event of an observe event is refused", run_main(
+        ["target-sid", gate_file, "--event", "ev_observe"]), 6)
+    check("and it reads no session", rec.calls, [])
+    rec = with_recorder(False)
+    check("a claimed act cannot override the record", run_main(
+        ["target-sid", gate_file, "--event", "ev_observe", "--action-class", "act"]), 6)
+    check("an id the inbox does not know is refused (cannot be checked)",
+          run_main(["target-sid", gate_file, "--event", "ev_missing"]), 6)
+    rec = with_recorder(False)
+    check("--event of an act event passes", run_main(
+        ["target-sid", gate_file, "--event", "ev_act"]), 0)
+    check("an event with no class recorded is refused, not assumed",
+          run_main(["target-sid", gate_file, "--event", "ev_legacy"]), 6)
+
+    rec = with_recorder(False, info_missing=True)
+    check("--new with observe is refused", run_main(
+        ["--new", "--cwd", tempfile.gettempdir(), "--action-class", "observe", gate_file]), 6)
+    check("and creates no session", [c for c in rec.calls if c[1][:2] == ["session", "new"]], [])
+    check("and launches nothing", rec.launched, [])
+    rec = with_recorder(False, info_missing=True)
+    check("--new with act still creates and sends", run_main(
+        ["--new", "--cwd", tempfile.gettempdir(), "--action-class", "act", gate_file]), 0)
+    check("exactly one session created",
+          len([c for c in rec.calls if c[1][:2] == ["session", "new"]]), 1)
+inbox_mod.PENDING, inbox_mod.HANDLED = saved
+os.unlink(gate_file)
+
 if FAILED:
     print("selftest_send: FAILED")
     for line in FAILED:

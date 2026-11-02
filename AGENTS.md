@@ -55,7 +55,8 @@
 > `awaiting_user` + `questionLike` 证据可推则代答并推进，涉及用户私人事实/偏好或白名单则升级；
 > `awaiting_user` 非提问：不要默认搁置——看收尾是否还有缺口、是否有人在等回复，能推进就推进；
 > `stalled` 判断真卡假卡；`new_session` 默认积极，看是否值得介入；
-> `external`：先按 `detail.payload_ref` 读正文，`action_class=observe` 只读不写；不需要动作就 ack（`docs/external-events.md`）。
+> `external`：先按 `detail.payload_ref` 读正文；`action_class` 不是 `act` 时**发消息/派工会被
+> `send.py`/`dispatch.py` 直接拒绝（退出码 6、零副作用）**——这是代码闸，不是靠你自觉；不需要动作就 ack（`docs/external-events.md`）。
 > **白名单之外一律积极处置**；不要因为"优先级低"就不动。
 >
 > **升级**：只把白名单里的事追加到 `reports/needs-you.md`（原地更新同一事项，不新开条目），
