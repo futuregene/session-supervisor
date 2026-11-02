@@ -150,6 +150,16 @@ def with_recorder(streaming, status_rc=0, info_missing=False, new_rc=0):
     return rec
 
 
+def run_capture(argv):
+    """Call main() and return (exit code, stdout) — the dry run is read, not just run."""
+    import contextlib
+    import io as _io
+    buffer = _io.StringIO()
+    with contextlib.redirect_stdout(buffer):
+        code = send.main(argv)
+    return code, buffer.getvalue()
+
+
 def run_main(argv):
     """Call main() with output swallowed; return its exit code."""
     saved = sys.stdout
@@ -594,6 +604,68 @@ with tempfile.TemporaryDirectory() as inbox_home:
           len([c for c in rec.calls if c[1][:2] == ["session", "new"]]), 1)
 inbox_mod.PENDING, inbox_mod.HANDLED = saved
 os.unlink(gate_file)
+
+print("strict argv: a flag this script does not define is an error, not noise")
+# The incident this pins: `--action-class observe` on a copy without the gate was read
+# as an unknown word, dropped, and the send went through. Silent tolerance is what turns
+# a restriction into a suggestion.
+with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False, encoding="utf-8") as fh:
+    fh.write("请把这条发出去。\n")
+    strict_file = fh.name
+rec = with_recorder(False)
+code, out = run_capture(["target-sid", strict_file, "--frobnicate"])
+check("an unknown flag exits 2", code, 2)
+check("and it prints the usage line", "send.py <session-id>" in out, True)
+check("and says the flag was not recognised", "unrecognised flag" in out, True)
+check("an unknown flag reads no session", rec.calls, [])
+check("an unknown flag records nothing", rec.recorded, False)
+check("an unknown flag queues nothing", deferred_rows(), [])
+rec = with_recorder(False)
+check("a misspelt known flag is refused too",
+      run_main(["target-sid", strict_file, "--actionclass", "observe"]), 2)
+check("--help prints the manual and exits 0", run_main(["--help"]), 0)
+
+print("--dry-run: every gate is walked, nothing is acted on")
+rec = with_recorder(False)
+code, out = run_capture(["target-sid", strict_file, "--action-class", "observe", "--dry-run"])
+check("a dry run that would be refused still exits 0", code, 0)
+check("it says which gate would stop it", "WOULD REFUSE by action_class" in out, True)
+check("and names the code the real call would use", "(exit 6)" in out, True)
+check("a dry run launches nothing", rec.launched, [])
+check("a dry run records no guard entry", rec.recorded, False)
+check("a dry run queues nothing", deferred_rows(), [])
+
+rec = with_recorder(False)
+code, out = run_capture(["target-sid", strict_file, "--action-class", "act", "--dry-run"])
+check("a dry run that would pass exits 0", code, 0)
+check("and says it would send", "WOULD SEND" in out, True)
+check("and still launches nothing", rec.launched, [])
+check("and still records nothing", rec.recorded, False)
+check("and still queues nothing", deferred_rows(), [])
+
+rec = with_recorder(False)
+code, out = run_capture(["target-sid", strict_file, "--dry-run"])
+check("no class at all is reported as not declared", "not declared" in out, True)
+check("and the manual path would still send", "WOULD SEND" in out, True)
+
+# The dry run must agree with the real path: same argv, one refuses by the same code.
+real = run_main(["target-sid", strict_file, "--action-class", "observe"])
+check("dry run and real path agree on the refusal", (code, real), (0, send.EXIT_ACTION))
+
+rec = with_recorder(False, info_missing=True)
+code, out = run_capture(["--new", "--cwd", tempfile.gettempdir(),
+                         "--action-class", "observe", strict_file, "--dry-run"])
+check("--new --dry-run exits 0", code, 0)
+check("--new --dry-run says it would be refused", "WOULD REFUSE" in out, True)
+check("--new --dry-run creates no session",
+      [c for c in rec.calls if c[1][:2] == ["session", "new"]], [])
+rec = with_recorder(False, info_missing=True)
+code, out = run_capture(["--new", "--cwd", tempfile.gettempdir(), strict_file, "--dry-run"])
+check("--new --dry-run without a class would create and send",
+      "WOULD CREATE AND SEND" in out, True)
+check("and creates nothing",
+      [c for c in rec.calls if c[1][:2] == ["session", "new"]], [])
+os.unlink(strict_file)
 
 if FAILED:
     print("selftest_send: FAILED")

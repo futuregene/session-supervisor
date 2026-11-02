@@ -40,7 +40,10 @@ belongs to such an event; `observe`, `triage`, an empty or an unknown value is r
 with exit 6 and no side effect at all — no session, no deferred row, no guard record.
 A send with neither flag is the manual path and behaves exactly as it always did.
 """
+import argparse
+import contextlib
 import datetime
+import io
 import json
 import os
 import re
@@ -552,9 +555,10 @@ def main_new(argv):
     note = parse_opt(argv, "--note")
     accept = parse_opt(argv, "--accept")
     # Refused before anything exists: `--new` is the write that costs the most (a new
-    # session starts running), so the class is checked before `session new`.
+    # session starts running), so the class is checked before `session new`. A dry run
+    # reports the same verdict from `dry_run_new` instead of returning here.
     refusal = action_refusal(opt_value(argv, ACTION_FLAG), opt_value(argv, "--event"))
-    if refusal:
+    if refusal and "--dry-run" not in argv:
         print(refusal)
         return EXIT_ACTION
     # Every flag that takes a value must be listed here: an unlisted value stays in
@@ -570,6 +574,9 @@ def main_new(argv):
               "[--note <topic>] <text-file>")
         return 2
     text_file = positional[0]
+
+    if "--dry-run" in argv:
+        return dry_run_new(repo_cwd, name, text_file, accept, note, argv)
 
     sid, why = create_session(repo_cwd, name)
     if not sid:
@@ -690,16 +697,181 @@ def spawn_delivery(log, timeout, sid, cwd, framed_file):
     return None  # still running: the run is in flight, which is what we want
 
 
+#: Every flag this script accepts. A flag that is not here is an **error**, not noise:
+#: silently dropping `--action-class observe` is how a one-line test injection became a
+#: real send — a copy without the gate read it as an unknown word and did exactly what it
+#: would have done anyway. argparse does the judging, because it is strict by default and
+#: a second hand-rolled scanner is precisely what caused that bug.
+VALUE_FLAGS = ("--timeout", "--note", "--intent", "--cwd", "--name", "--accept",
+               "--action-class", "--event")
+BOOL_FLAGS = ("--force", "--wait", "--new", "--dry-run")
+USAGE = ("send.py <session-id> <text-file> [flags] | send.py --new --cwd <repo> "
+         "[--name <title>] [--accept \"<what closes it>\"] [--note <topic>] <text-file>")
+#: How much of the body a dry run prints. Enough to recognise the message, short of
+#: turning the terminal into a second copy of the body.
+DRY_BODY_LINES = 5
+
+
+def strict_argv(argv):
+    """`(2, message)` when argv names a flag this script does not define, else `None`.
+
+    `parse_args`, never `parse_known_args`: an unrecognised `--x` must fail loudly. The
+    parsed values are thrown away — what is being checked is the vocabulary, not the
+    parse (the hand-rolled reader below stays as it is, so no existing refusal changes).
+    """
+    parser = argparse.ArgumentParser(add_help=False, prog="send.py", usage=USAGE)
+    for flag in VALUE_FLAGS:
+        parser.add_argument(flag, nargs="?", default=None)
+    for flag in BOOL_FLAGS:
+        parser.add_argument(flag, action="store_true")
+    parser.add_argument("rest", nargs="*")
+    try:
+        # argparse reports to stderr and exits; swallow that copy so the caller sees one
+        # usage line, on stdout, with the reason — a wake's tool result is stdout.
+        with contextlib.redirect_stderr(io.StringIO()):
+            parser.parse_args(argv)
+    except SystemExit:
+        return (2, f"{USAGE}\nunrecognised flag — nothing was sent")
+    return None
+
+
+def _preview(text):
+    lines = text.splitlines()
+    shown = [f"    {line}" for line in lines[:DRY_BODY_LINES]]
+    if len(lines) > DRY_BODY_LINES:
+        shown.append(f"    … ({len(lines) - DRY_BODY_LINES} more line(s))")
+    return f"{len(lines)} line(s):\n" + "\n".join(shown)
+
+
+def _report(rows, verdict):
+    """Print the walk and the verdict. `rows` is (gate, observed, outcome)."""
+    print("dry run — nothing is sent, created, queued or recorded")
+    width = max(len(name) for name, _, _ in rows)
+    for name, observed, outcome in rows:
+        print(f"  {name.ljust(width)} : {observed}" + (f"  → {outcome}" if outcome else ""))
+    print(f"  verdict{' ' * (width - 7)} : {verdict}")
+
+
+def dry_run_send(argv):
+    """Walk `main()`'s gates in its order, print what each decides, and send nothing.
+
+    Exit 0 even when a gate would refuse: the job of a dry run is to finish the
+    reasoning, not the send. The verdict names the gate and the code the real call
+    would end with — `selftest_send.py` checks the two agree, because a dry run that
+    disagrees with the real path is worse than none.
+    """
+    sid, text_file = argv[0], argv[1]
+    if not os.path.isfile(text_file):
+        print(f"no such body file: {text_file}")
+        return 2
+    note = parse_opt(argv, "--note")
+    intent = parse_opt(argv, "--intent", None)
+    forced = "--force" in argv
+    declared = opt_value(argv, ACTION_FLAG)
+    event_id = opt_value(argv, "--event")
+
+    rows, verdict = [], (0, "WOULD SEND (1 relay) — nothing was sent")
+    rows.append(("target", sid, ""))
+
+    refusal = action_refusal(declared, event_id)
+    rows.append(("action_class", declared if declared is not None else
+                 (f"from {event_id}" if event_id else "not declared"),
+                 f"WOULD REFUSE (exit {EXIT_ACTION})" if refusal else "passes"))
+
+    text = frame(open(text_file, encoding="utf-8").read(), sid, note, intent)
+    quiet = quiet_intent(text)
+    rows.append(("content", _preview(text), ""))
+    rows.append(("intent", QUIET_LABEL if quiet else "action",
+                 f"WOULD REFUSE (exit 5)" if quiet and not forced else "passes"))
+
+    state, _known = read_state(sid)
+    cwd, why = resolve_cwd(sid)
+    rows.append(("cwd", cwd if cwd else (why or "unreadable"),
+                 "passes" if cwd else "WOULD REFUSE (exit 1)"))
+    owned, goal_why = (False, "")
+    if SKIP_GOAL_SESSIONS and sid != supervisor_session():
+        owned, goal_why = goal_owned(sid, state, extra_roots=[cwd] if cwd else [])
+    rows.append(("goal worker", (goal_why or "yes") if owned else "no",
+                 "WOULD REFUSE (exit 4)" if owned and not forced else "passes"))
+    mid_run = busy(state)
+    rows.append(("mid-run", {True: "yes", False: "no", None: "unreadable"}.get(mid_run, "?"),
+                 "WOULD DEFER (exit 3)" if mid_run and not forced else "passes"))
+
+    # `guard.py check` walks every recent session, so on a large install it can take a
+    # while and may time out. A guard that cannot answer must not crash the walk: say so
+    # and let the verdict stay "unknown there", because the real call will ask again.
+    try:
+        grc, gout, gerr = run_py([os.path.join(WATCH, "bin", "guard.py"), "check", sid])
+        guard_said = (gout or gerr).strip()[:160] or "(no output)"
+        rows.append(("guard quota", guard_said,
+                     "WOULD DEFER (exit 1)" if grc != 0 and not forced else "passes"))
+    except Exception as error:  # noqa: BLE001 - any failure here is "could not answer"
+        rows.append(("guard quota", f"could not be evaluated ({type(error).__name__})",
+                     "unknown — the real call asks again"))
+
+    # First gate that would not pass, in `main()`'s order, is the verdict.
+    order = ["action_class", "intent", "cwd", "goal worker", "mid-run", "guard quota"]
+    by_name = {name: outcome for name, _, outcome in rows}
+    for name in order:
+        if by_name.get(name, "").startswith("WOULD"):
+            verdict = (int(by_name[name].split("exit ")[1].rstrip(")")), f"WOULD REFUSE by {name}")
+            break
+    else:
+        verdict = (0, "WOULD SEND (1 relay) — nothing was sent")
+    _report(rows, verdict[1]
+            + ("" if verdict[0] == 0 else f" (exit {verdict[0]})"))
+    return 0
+
+
+def dry_run_new(repo_cwd, name, text_file, accept, note, argv):
+    """The `--new` half: the session it would create is never created."""
+    if not os.path.isfile(text_file):
+        print(f"no such body file: {text_file}")
+        return 2
+    declared = opt_value(argv, ACTION_FLAG)
+    event_id = opt_value(argv, "--event")
+    refusal = action_refusal(declared, event_id)
+    text = frame(open(text_file, encoding="utf-8").read(), "", note, parse_opt(argv, "--intent", None))
+    rows = [("target", f"new session in {repo_cwd or '(no --cwd)'}"
+             + (f" named {name!r}" if name else ""),
+             "passes" if repo_cwd and os.path.isdir(repo_cwd) else "WOULD REFUSE (exit 1)"),
+            ("action_class", declared if declared is not None else
+             (f"from {event_id}" if event_id else "not declared"),
+             f"WOULD REFUSE (exit {EXIT_ACTION})" if refusal else "passes"),
+            ("tracking", f"dispatch row (accept: {accept!r})" if accept else "none (no --accept)", ""),
+            ("content", _preview(text), "")]
+    verdict = f"WOULD CREATE AND SEND (1 session, 1 relay) — nothing was created"
+    if refusal:
+        verdict = f"WOULD REFUSE by action_class (exit {EXIT_ACTION})"
+    elif not (repo_cwd and os.path.isdir(repo_cwd)):
+        verdict = "WOULD REFUSE by cwd (exit 1)"
+    _report(rows, verdict)
+    return 0
+
+
 def main(argv):
     if argv[:1] == ["--deliver"]:
         # Internal: the detached child that actually performs the relay.
         _log, _timeout, _sid, _cwd, _framed = argv[1:6]
         return 0 if deliver(_log, int(_timeout), _sid, _cwd, _framed) == 0 else 1
+    if argv[:1] in (["-h"], ["--help"], ["help"]):
+        print(__doc__)
+        return 0
+    # Before anything is read: a flag this script does not define is an error. See
+    # `strict_argv` for why a silently ignored `--action-class` was a real incident.
+    bad = strict_argv(argv)
+    if bad:
+        print(bad[1])
+        return bad[0]
     if "--new" in argv:
         return main_new(argv)
     if len(argv) < 2:
         print(__doc__)
         return 2
+    # A dry run answers "what would happen" without any of it happening; it is also the
+    # only safe way to test an injected message, since it cannot deliver one.
+    if "--dry-run" in argv:
+        return dry_run_send(argv)
     sid, text_file = argv[0], argv[1]
     timeout = 1800
     note = ""

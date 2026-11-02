@@ -45,6 +45,10 @@ So a dispatch row carries what a wake needs to judge it:
 this field only puts the judgement in front of whoever is reading instead of in their memory.
 There is no auto-close behind it and no plan for one.
 
+**Unknown flags are an error.** argparse rejects them (exit 2, usage on stderr); this
+script never invents a lenient second parser, because a silently dropped flag is how a
+restricted call becomes a real action (see `bin/send.py`).
+
 **`add` is gated by `action_class`.** An event from `bin/trigger.py` carries one, and only
 `act` may open work: `--action-class act` (or `--event <id>`, which reads the class from the
 inbox record and cannot be argued around) is required for a dispatch that belongs to such an
