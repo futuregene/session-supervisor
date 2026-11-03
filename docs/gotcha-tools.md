@@ -246,6 +246,14 @@
 - **配套规矩**：外部命令失败（`rc != 0`）时不要计作成功，也不要只写进「已批准」那种单面账本——
   要么写 `failed` 并算进预算，要么重试，二者都不能悄悄吞掉。
 - 探针：`bin/selftest_deny.py` 的 `approve argv` 一条（19 个用例里的最后一个）。
+- **同一处的下一层**：修好 `--note` 之后，让 approve 失败的换成了**请求 id 的键名**——agent 给的 payload 是
+  `approval_request_id`（snake_case），而脚本读的是 `requestId`/`id`，于是 argv 里送下去的是字符串 `None`，
+  CLI 回 `approval request `None` is not pending`，账本记 `failed`。判据同上：**拿一次真实的 payload 核键名**，
+  不要按命名习惯猜；`bin/selftest_approvals.py` 现在同时钉住三种拼写与“payload 用哪一种”。
+- **成本一层**（同一轮发现的）：`auto` 原来对**每个会话**跑一次 `future session approvals`，几百个会话就是几百个
+  CLI 子进程/轮，每个都留一对 `~/.future/cli/logs/cli.<pid>.log`。取数已收窄到“可能变过的会话”
+  （`approvals.py: candidates()`）；两条信号必须**实测**而不是推理得出：停在权限请求上的会话 `isStreaming` 仍为 true，
+  请求出现时该会话的 `updatedAtMs` 会跳变。取数方式可以省，决策规则一条都不能省。
 
 ### D34 `cd` 只改 `$PWD`；`.NET` 的 `[System.IO.File]` 仍按**进程启动目录**解析相对路径
 

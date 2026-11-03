@@ -33,6 +33,8 @@
   "auto_approve": true,
   "auto_approve_per_cycle": 5,
   "auto_approve_per_hour": 20,
+  "max_approval_checks_per_cycle": 40,
+  "approval_rescan_hours": 2,
   "fresh_window_hours": 24,
   "max_events_per_scan": 25,
   "resync_gap_seconds": 300,

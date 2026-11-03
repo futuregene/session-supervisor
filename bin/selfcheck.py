@@ -91,6 +91,23 @@ def check_guard_selftest() -> tuple[bool, str]:
     return p.returncode == 0, (tail[-1] if tail else f"exit {p.returncode}")
 
 
+def check_approvals_selftest() -> tuple[bool, str]:
+    """Auto-approval must find every parked request without asking every session.
+
+    The cycle used to run one `future session approvals` per session every 30 s on a
+    few hundred sessions, so almost all of its work was spawning CLI processes (each
+    leaving a log pair that is never cleaned up) to learn that nothing was pending.
+    The narrowing has two ways to go wrong, and both are pinned in
+    `selftest_approvals.py` against a fake `future` executable that counts spawns:
+    it can miss a request (a parked run is still `isStreaming`; a new request bumps
+    `updatedAtMs`), or it can quietly change a decision (deny list, per-cycle and
+    per-hour budgets, PAUSE, excluded sessions).
+    """
+    p = run([sys.executable, os.path.join(ROOT, "bin", "selftest_approvals.py")])
+    tail = (p.stdout or "").strip().splitlines()
+    return p.returncode == 0, (tail[-1] if tail else f"exit {p.returncode}")
+
+
 def check_scan_selftest() -> tuple[bool, str]:
     p = run([sys.executable, os.path.join(ROOT, "bin", "selftest_scan.py")])
     tail = (p.stdout or "").strip().splitlines()
@@ -710,6 +727,7 @@ CHECKS = [
     ("shell syntax", check_shell_syntax),
     ("json", check_json),
     ("guard selftest", check_guard_selftest),
+    ("approvals selftest", check_approvals_selftest),
     ("send guard invocation", check_send_guard_invocation),
     ("relay format", check_relay_format),
     ("scan selftest", check_scan_selftest),

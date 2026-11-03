@@ -37,7 +37,7 @@ runbooks/supervisor-daemon.md）——只负责让下一行一直活着
 |---|---|---|
 | `bin/watchd.sh` | 常驻循环，串起 scan → approvals → decide | `logs/watchd.log` |
 | `bin/scan.py` | 对比 `state/state.json` 基线与会话列表，产出事件；跳过 goal worker | `inbox/pending.jsonl`、`state/health.json` |
-| `bin/approvals.py` | `auto` 批准待批权限（带拒绝清单与每小时上限） | `state/approvals.jsonl`、`reports/approvals.md` |
+| `bin/approvals.py` | `auto` 批准待批权限（带拒绝清单与每小时上限）；每轮只问**可能变过的**会话（`max_approval_checks_per_cycle` 上限 + `approval_rescan_hours` 兜底），答案缓存在 `state/approval-cache.json` | `state/approvals.jsonl`、`reports/approvals.md` |
 | `bin/decide.py` | 节流后决定是否唤醒，并 spawn `wake.sh`；先把被取代的事件折叠掉（`inbox.fold_superseded`） | `state/turn_payload.json`、`state/wakes.jsonl` |
 | `bin/wake.sh` | 先问 `monitor_roll.py` 该唤醒哪个会话，再用 `future run` 跑一个回合 | `logs/wake-<ts>-<reason>.log` |
 | `bin/monitor_roll.py` | 会话过长时用 `future session reset` **原地重置本会话历史**（不换会话）；本机没有该子命令或重置失败时才另开新会话并归档旧的 | `state/monitor_session.txt`、`state/monitor_reset.json` |
