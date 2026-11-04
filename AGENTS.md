@@ -108,9 +108,11 @@
 - **合并结果要进记录**：push / PR / 合并之后，分支名、commit、PR 号与合并结果写进 `journal/` 与
   `reports/on-your-behalf.md`（**直接写，不进 git**）；`python3 bin/selfcheck.py` 与 PR CI 必须实际跑过并全绿
   （分支模型、worktree、auto merge 的细节见 [docs/git-flow.md](docs/git-flow.md)）。
-- **任务提示词会两处漂移**：源文件在 `prompts/`，任务库里存的是副本——改完必须
-  `future task edit <id> --prompt-file <文件>` 同步，否则任务跑旧副本。**改触发时间/周期会改变用户看到的
-  节奏**，先记 `reports/decisions/`。
+- **任务提示词会两处漂移，而 `prompts/` 并不覆盖全部任务**：那里只有唤醒与简报那几份；巡检、PR 合并、
+  复盘这类长提示词**只在任务库里有一份**，没有可 diff 的源文件。所以改之前先 `ls prompts/` 确认，
+  不存在就用 `future task show <id> --prompt` 把**当前生效的那一份**导出来再改——**先导出、后修改**；
+  改完 `future task edit <id> --prompt-file <文件>` 同步（历史与回退看 `future task prompt log <id>`）。
+  否则任务跑旧副本，而且唯一的规则库连历史都没有。**改触发时间/周期会改变用户看到的节奏**，先记 `reports/decisions/`。
 - **别把产物写进本仓库**：被处理的会话需要 `future-browser` / `future-image` / `future-slides` 之类时，
   产物写在该会话自己的工作区。
 - **检索比推理便宜，也更可信**：拿不准的机制、陌生的报错原文、某个库的默认语义、别人有没有踩过同一个坑——
