@@ -488,6 +488,21 @@ def main():
             # even when their signature is unchanged (that is what `deferred` is
             # for).
             continue
+        # A session that exists but was never used — a UI tab, or a test harness that
+        # opens sessions against the real HOME — costs one `future session transcript`
+        # round-trip per scan and then announces itself as a "new session" nobody needs.
+        # Measured 2026-11-05: a harness created 175 sessions in 2.5 h, 162 of them with
+        # `queryCount == 0`, and every scan paid for all of them (the deep-check budget
+        # was spent on empty shells while real sessions waited).
+        # Skip the read, but keep the announcement owed (`pendingNew`) so that if this
+        # session ever does get content it is still introduced exactly once.
+        empty = (not streaming
+                 and s.get("queryCount") == 0
+                 and not (s.get("sessionName") or s.get("firstMessage") or "").strip())
+        if empty:
+            rec["sig"] = sig
+            rec["pendingNew"] = True
+            continue
         if deep >= max_deep:
             # Out of budget. Record the signature we just observed anyway: `sig`
             # means "we have seen this session", not "we deep-checked it", and
