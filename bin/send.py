@@ -70,6 +70,15 @@ SPAWN_CHECK_SECONDS = 8.0
 # A relayed message starts with this heading (see `frame()`); the legacy form
 # `[会话总管 <id> 转达] …` is still recognised so old sends keep being counted.
 RELAY_HEADING = "### 会话总管转达"
+# The one boundary a target cannot infer from the task text, so it rides in every
+# relay: acting on the *user's* public identity (closing an issue, commenting on a
+# remote, mailing anyone) is a whitelist item even when the finding is sound. On
+# 2026-11-05 session 0f0b18f5 diagnosed issue #1523 correctly and then closed it as
+# NOT_PLANNED on its own — a public action under the user's account that only he
+# can authorise. It is stated as a hand-back, not a prohibition, so a target with a
+# genuinely public step still gets there through this facility instead of silently.
+BOUNDARY_LINE = ("**边界** 只做正文要求的事；改远端公开状态（关/开 issue、发评论、"
+                 "对外发送）与发版、部署、删数据，先回一句，由会话总管去问用户。")
 LEGACY_PREFIX = re.compile(r"^\[会话总管[^\]]*\]\s*")
 # A topic line written *into the body* by mistake. The header already carries one
 # (`**主题** <note>`), so a body-level line produced two of them in the delivered
@@ -284,8 +293,8 @@ def frame(text, sid, note="", intent=None):
         intent = QUIET_LABEL if quiet else "需要你执行"
     first_line = f"{RELAY_HEADING} · {intent} · 非用户本人"
     if not note:
-        return f"{first_line}\n\n{body}"
-    return f"{first_line}\n\n**主题** {note}\n\n---\n\n{body}"
+        return f"{first_line}\n\n{BOUNDARY_LINE}\n\n---\n\n{body}"
+    return f"{first_line}\n\n**主题** {note}\n\n{BOUNDARY_LINE}\n\n---\n\n{body}"
 
 
 def quiet_intent(framed):
