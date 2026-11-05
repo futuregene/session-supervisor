@@ -65,9 +65,18 @@ ACTIVE_WINDOW = 24 * 3600
 ENTRY = re.compile(r"^\s*[-*]\s+\[(?P<title>[^\]]+)\]\((?P<dest>[^)]+)\)", re.M)
 DATE = re.compile(r"\((\d{4}-\d{2}-\d{2})\)")
 ANY_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
-# Appended-correction vocabulary: the shape a correction takes when it is added
-# *under* the claim it corrects instead of replacing it.
-APPEND_MARK = re.compile(r"(补）|补：|更正|修正|后来|已改|改为|不再|已废|废弃|superseded|deprecated)", re.I)
+# A supersession is an act, not a word: the line must both say that something was
+# replaced *and* name what it replaced. Measured 2026-11-06, before narrowing — the
+# vocabulary alone (补/更正/已改/不再/后来/…) fired on 9 of 34 topic files in one
+# workspace and none of the nine voided a claim: `不再新建 socket` describes the
+# world, `发现时应顺手修正` is an instruction, `后来起的 worktree` is a sequence. What
+# they share is the word, not the act. So the test is conjoint, and confined to one
+# line (`此前写的是 A，已改为 B`); the strikethrough form it recommends stays exempt.
+SUPERSEDE_VERB = re.compile(
+    r"(不再|已不成立|已作废|作废|取代|废弃|改为|改成|更正|修正|已改|superseded|deprecated)", re.I)
+PRIOR_CLAIM = re.compile(
+    r"(此前|原先|旧说法|旧记录|旧结论|旧值|本文早先|之前写的是|之前写的|之前写|以前写的|以前写|曾写|已不成立)",
+    re.I)
 SUPERSEDED_MARK = re.compile(r"(~~|SUPERSEDED\()", re.I)
 # A repo-relative path quoted in backticks: has a slash, no spaces, not a URL, not a
 # home-absolute path (those belong to another machine and cannot be checked here).
@@ -84,6 +93,19 @@ PATH_ROOTS = {".future", ".worktrees", "bin", "docs", "prompts", "scripts", "src
 # references buried the real ones under noise on the first run (2026-11-06).
 BUILD_DIRS = {"coverage", "build", "target", "outputs", "intermediates",
               "node_modules", "dist", ".next"}
+
+
+def superseded_line(line: str) -> bool:
+    """Does this one line declare that an earlier statement no longer holds?
+
+    Both halves are required: the replacing verb alone is ordinary prose, and the
+    reference to the earlier statement alone says nothing was replaced. A line that
+    already strikes the old text through (or carries `SUPERSEDED(…)`) is what the
+    convention asks for, so it is not reported.
+    """
+    if SUPERSEDED_MARK.search(line):
+        return False
+    return bool(SUPERSEDE_VERB.search(line) and PRIOR_CLAIM.search(line))
 
 
 def looks_like_repo_path(p: str) -> bool:
@@ -220,13 +242,20 @@ def check_topic_files(ws: str) -> list:
         if not ANY_DATE.search(text):
             out.append(finding(ws, "undated-file", rel, "action",
                                "整份没有任何日期 —— 「过期要复核」这条规则对它无效"))
-        appended = APPEND_MARK.findall(text)
-        if appended and not SUPERSEDED_MARK.search(text):
-            # A correction is present and nothing marks the superseded claim: the
-            # reader has no way to tell which sentence is current.
-            out.append(finding(ws, "unmarked-supersession", rel, "action",
-                               f"{len(appended)} 处「补/更正/已改/不再」类更正，但没有任何划改或 SUPERSEDED 标记"
-                               " → 旧说法仍冒充现行；改写为 `~~旧~~ → 新（日期）` 或 `SUPERSEDED(日期) by …`"))
+        # A file that already marks supersessions (`~~old~~ → new` / `SUPERSEDED(…)`)
+        # is left alone: the convention is demonstrably in use, so a reader has a
+        # marker to follow even where one correction is stated in prose.
+        if not SUPERSEDED_MARK.search(text):
+            declared = [(n, ln.strip()) for n, ln in enumerate(text.splitlines(), 1)
+                        if superseded_line(ln)]
+            if declared:
+                n, sample = declared[0]
+                out.append(finding(ws, "unmarked-supersession", rel, "action",
+                                   f"{len(declared)} 处在本文件里宣告旧说法作废，但没有划改"
+                                   f"（首见第 {n} 行：「{sample[:60]}」）"
+                                   " → 读者得自己分辨哪句现行；改写为 `~~旧~~ → 新（日期）`"
+                                   " 或 `SUPERSEDED(日期) by …`",
+                                   n))
         for m in QUOTED_PATH.finditer(text):
             p = m.group(1)
             if not looks_like_repo_path(p):
@@ -361,7 +390,8 @@ def selftest() -> int:
         rows += [f"- [n{i}](.future/memory/full.md) — filler (2026-01-01)" for i in range(30)]
         open(os.path.join(ws, "FUTURE.md"), "w", encoding="utf-8").write("\n".join(rows) + "\n")
         open(os.path.join(mem, "a.md"), "w", encoding="utf-8").write(
-            "先跑 `scripts/run.sh`（2026-01-01 补）：后来改成别的（2026-02-02 更正）\n")
+            "此前写的是先跑 `scripts/run.sh`（2026-01-01），后来改成 `scripts/run2.sh`"
+            "（2026-02-02 更正）\n")
         open(os.path.join(mem, "full.md"), "w", encoding="utf-8").write("x" * 50)
         f = scan([ws])
         kinds = {x["kind"] for x in f}
@@ -385,6 +415,32 @@ def selftest() -> int:
         if "unmarked-supersession" in kinds2:
             print("selftest FAIL: marked supersession still reported")
             ok = False
+        # Narrowed 2026-11-06: the check used to fire on the vocabulary alone and
+        # produced 9 findings a night in one workspace, none of them a voided claim.
+        # Both directions are pinned here, because a detector that is narrowed until
+        # it never fires passes the first half of this test and no longer detects
+        # anything: (a) an explicit "the old wording is void" still fires, including
+        # when it is written as plain prose a reader would have to untangle; (b) the
+        # same words doing ordinary work do not.
+        cases = [
+            ("真更正·时间对比词+更正", "此前写的是每 3 小时跑一次；实际每 60 分钟（2026-11-06 更正）\n", True),
+            ("真更正·旧说法+改为", "旧说法：`future loop`；已改为 `future goal`。\n", True),
+            ("真更正·原先+不再", "原先这里要手动 `make install`；现在不再需要。\n", True),
+            ("已划改·推荐形态", "~~构建会下载 Gradle~~ → 缓存命中，不下载（2026-11-06）\n", False),
+            ("普通叙述·不再（实测事实）", "加了 `--grpc-addr` 之后 socket 不再新建（2026-09-24 实测）\n", False),
+            ("普通叙述·修正（操作建议）", "reviewer 重新推导出错误前提，发现时应顺手修正并记一行\n", False),
+            ("普通叙述·后来（顺序）", "先起的那个工作树的 vite 会把后来的所有 run 都当成自己的代码\n", False),
+            ("普通叙述·废弃（描述旧代码）", "恢复出来的是另一个会话几天前留在同名路径的旧版（还在用早已废弃的 `get_available_models`）\n", False),
+        ]
+        for label, body, want in cases:
+            open(os.path.join(mem, "r.md"), "w", encoding="utf-8").write(
+                f"# r\n\n复核（2026-01-01）\n\n{body}")
+            got = "unmarked-supersession" in {x["kind"] for x in scan([ws])
+                                               if x["path"].endswith("r.md")}
+            if got != want:
+                print(f"selftest FAIL: {label}: expected flag={want}, got flag={got}")
+                ok = False
+        os.remove(os.path.join(mem, "r.md"))
     print("selftest ok" if ok else "selftest FAILED")
     return 0 if ok else 1
 

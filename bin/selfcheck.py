@@ -248,6 +248,22 @@ def check_ensure_append_selftest() -> tuple[bool, str]:
     return p.returncode == 0, (tail[-1] if tail else f"exit {p.returncode}")
 
 
+def check_memlint_selftest() -> tuple[bool, str]:
+    """The nightly memory lint must keep both its precision and its teeth.
+
+    `unmarked-supersession` matched a *vocabulary*, so any file that used 不再/修正/后来
+    once was reported — 9 findings in one workspace on 2026-11-06, none of them a
+    voided claim, and each one burned a slice of the dreaming run. The narrowed rule
+    needs the act, not the word (a replacing verb **and** a reference to the earlier
+    statement, on one line). Both halves are pinned in `memlint.py --selftest`, and
+    this check is what makes the pin actually run: without it a silent widening (or a
+    detector narrowed until it never fires) costs a night's budget per regression.
+    """
+    p = run([sys.executable, os.path.join(ROOT, "bin", "memlint.py"), "--selftest"])
+    tail = (p.stdout or "").strip().splitlines()
+    return p.returncode == 0, (tail[-1] if tail else f"exit {p.returncode}")
+
+
 def check_roll_selftest() -> tuple[bool, str]:
     """The supervisor must outlive its own context: compact before replacing.
 
@@ -746,6 +762,7 @@ CHECKS = [
     ("prune selftest", check_prune_selftest),
     ("liveness selftest", check_liveness_selftest),
     ("ensure-append selftest", check_ensure_append_selftest),
+    ("memlint selftest", check_memlint_selftest),
     ("no secrets in tracked files", check_no_secrets),
     ("private dir ignored", check_private_not_tracked),
     ("runtime files ignored", check_runtime_files_ignored),
