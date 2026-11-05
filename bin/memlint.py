@@ -1,0 +1,419 @@
+#!/usr/bin/env python3
+"""Mechanical lint for the workspace memory that this facility keeps and reads.
+
+Why this exists (user, 2026-11-06): the value of a background "dream" pass is not
+adding more memory but *consolidating and forgetting* — the memory layer degrades by
+piling up. Measured on this machine before writing this file:
+
+    * `future-os/FUTURE.md` was 12,027 bytes against a 12,000-byte cap, so the loader
+      truncates it at load time — a silent loss that no reader can see;
+    * of 52 topic files across three workspaces, 28 carried appended corrections
+      ("补/更正/已改/不再") and **none** used a strikethrough or a SUPERSEDED marker,
+      so a reader going top-down meets the stale claim first;
+    * 8 files carried no date at all, so "verify anything older than 7 days" could
+      never fire on them;
+    * one index line stated a task cadence of "每 3 小时" while the task actually ran
+      every 60 minutes — the kind of error that reading the text again cannot find,
+      because the text does not contradict itself.
+
+Two rules follow from those, and this script enforces only what is mechanical:
+
+1. **Age never deletes.** Seven days means "re-check before relying on it". Removal is
+   caused by being disproven or superseded, and a store that is too big gets an
+   *archive* suggestion, never a deletion (see `docs/dreaming.md`).
+2. **A claim counts as a fact only if something can check it.** Anything that names a
+   path, a command, a port or a period should carry a way to confirm it. The cheap,
+   safe half of that is here: repo-relative paths quoted in backticks are resolved.
+   Memory files are treated as *untrusted input* — no command from them is ever run,
+   which is why this script verifies paths by walking the filesystem instead.
+
+What it deliberately does not do: judge whether a statement is true in prose, rewrite
+any file, or run anything a memory file asks for. Those belong to the stage-2 agent and
+to the owning repository's review.
+
+Usage:
+    python3 bin/memlint.py                      # 24h-active workspaces, write the report
+    python3 bin/memlint.py --workspace /path    # explicit (repeatable), print only
+    python3 bin/memlint.py --json               # machine-readable findings
+    python3 bin/memlint.py --record             # append this run to the audit ledger
+    python3 bin/memlint.py --actions-file F     # JSON list of what the run changed
+    python3 bin/memlint.py --selftest
+
+Exit codes: 0 no actionable finding, 1 actionable findings, 2 the scan itself failed.
+"""
+import argparse
+import datetime
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+
+WATCH = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+STATE = os.path.join(WATCH, "state")
+REPORTS = os.path.join(WATCH, "reports", "memory")
+LEDGER = os.path.join(STATE, "memlint.jsonl")
+
+# Caps from the memory convention this facility is written against (30 entries /
+# 100 lines / 12 KB). Kept here so the check and the loader cannot drift apart
+# silently; if the loader's cap changes, this constant changes with it.
+CAP_BYTES, CAP_LINES, CAP_ENTRIES = 12000, 100, 30
+STALE_DAYS = 7
+ACTIVE_WINDOW = 24 * 3600
+
+ENTRY = re.compile(r"^\s*[-*]\s+\[(?P<title>[^\]]+)\]\((?P<dest>[^)]+)\)", re.M)
+DATE = re.compile(r"\((\d{4}-\d{2}-\d{2})\)")
+ANY_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
+# Appended-correction vocabulary: the shape a correction takes when it is added
+# *under* the claim it corrects instead of replacing it.
+APPEND_MARK = re.compile(r"(补）|补：|更正|修正|后来|已改|改为|不再|已废|废弃|superseded|deprecated)", re.I)
+SUPERSEDED_MARK = re.compile(r"(~~|SUPERSEDED\()", re.I)
+# A repo-relative path quoted in backticks: has a slash, no spaces, not a URL, not a
+# home-absolute path (those belong to another machine and cannot be checked here).
+# The first segment must look like a directory that exists in this kind of repo: a
+# bare `future/deepseek-flash` is a model id, `origin/main` a git ref and
+# `owner/repo` a GitHub slug — none of them are paths, and treating them as paths
+# produced 25 false "missing path" findings on the first run (2026-11-06).
+QUOTED_PATH = re.compile(r"`([A-Za-z0-9._/@+-]*/[A-Za-z0-9._/@+-]+)`")
+PATH_ROOTS = {".future", ".worktrees", "bin", "docs", "prompts", "scripts", "src",
+              "tests", "test", "mobile", "desktop", "harness", "tui", "crates",
+              "packages", "skills", "apps", "lib", "internal", "cmd", "assets"}
+# Build output and placeholders: a memory file may legitimately name a path that only
+# exists after a build, or write `a/.../b` as shorthand. Reporting those as broken
+# references buried the real ones under noise on the first run (2026-11-06).
+BUILD_DIRS = {"coverage", "build", "target", "outputs", "intermediates",
+              "node_modules", "dist", ".next"}
+
+
+def looks_like_repo_path(p: str) -> bool:
+    if p.startswith(("/", "~", "./")) or "://" in p or "@" in p:
+        return p.startswith("./")
+    if "..." in p:
+        return False
+    if any(seg in BUILD_DIRS for seg in p.split("/")):
+        return False
+    first = p.split("/", 1)[0]
+    return first in PATH_ROOTS
+
+
+def load_state_sessions() -> dict:
+    try:
+        with open(os.path.join(STATE, "state.json"), encoding="utf-8") as fh:
+            return json.load(fh).get("sessions", {}) or {}
+    except Exception:
+        return {}
+
+
+def active_session_ids(now=None) -> list:
+    now_ms = (now or time.time()) * 1000
+    return [sid for sid, v in load_state_sessions().items()
+            if now_ms - (v.get("lastUpdMs") or 0) < ACTIVE_WINDOW * 1000]
+
+
+def cwds_of(session_ids: list) -> list:
+    """Workspaces of those sessions, via the session registry.
+
+    `state.json` records activity per session but not where it ran, so the mapping
+    comes from `future session list`. A CLI that is down is not an error for a lint
+    run: the caller then passes `--workspace` explicitly.
+    """
+    if not session_ids:
+        return []
+    try:
+        out = subprocess.run(["future", "session", "list", "--json"],
+                             capture_output=True, text=True, timeout=180,
+                             env={**os.environ, "PATH": os.environ.get("PATH", "")})
+        sessions = json.loads(out.stdout).get("sessions", [])
+    except Exception:
+        return []
+    by_id = {s.get("id"): s.get("cwd") for s in sessions}
+    seen, out_cwds = set(), []
+    for sid in session_ids:
+        cwd = by_id.get(sid)
+        if cwd and cwd not in seen and os.path.isdir(cwd):
+            seen.add(cwd)
+            out_cwds.append(cwd)
+    return sorted(out_cwds)
+
+
+def has_memory(ws: str) -> bool:
+    return (os.path.isfile(os.path.join(ws, "FUTURE.md"))
+            or os.path.isdir(os.path.join(ws, ".future", "memory")))
+
+
+def finding(ws, kind, path, severity, detail, line=None):
+    return {"workspace": ws, "kind": kind, "path": path, "severity": severity,
+            "detail": detail, "line": line}
+
+
+def check_index(ws: str, now_date: datetime.date) -> list:
+    """Lint `FUTURE.md`: capacity, dating, links, duplicate titles."""
+    out = []
+    fut = os.path.join(ws, "FUTURE.md")
+    if not os.path.isfile(fut):
+        return out
+    text = open(fut, encoding="utf-8", errors="replace").read()
+    entries = list(ENTRY.finditer(text))
+    size, lines = len(text.encode()), text.count("\n") + 1
+
+    over = []
+    if size > CAP_BYTES:
+        over.append(f"{size} B > {CAP_BYTES} B")
+    if lines > CAP_LINES:
+        over.append(f"{lines} lines > {CAP_LINES}")
+    if len(entries) > CAP_ENTRIES:
+        over.append(f"{len(entries)} entries > {CAP_ENTRIES}")
+    if over:
+        # Archive, never delete: the loader would silently drop the tail otherwise.
+        out.append(finding(ws, "capacity", "FUTURE.md", "action",
+                           "超过上限（" + "; ".join(over) + "）→ 移动到 .future/memory/archive/ 并在索引留一行指针，不要删除"))
+
+    titles = {}
+    dests = {}
+    for m in entries:
+        line_no = text[:m.start()].count("\n") + 1
+        title, dest = m.group("title").strip(), m.group("dest").strip()
+        tail = text[m.end():text.find("\n", m.end())]
+        if not DATE.search(tail):
+            out.append(finding(ws, "undated-entry", "FUTURE.md", "info",
+                               f"条目「{title[:40]}」没有 (YYYY-MM-DD) —— 无法被「7 天复核」规则命中", line_no))
+        else:
+            d = DATE.search(tail).group(1)
+            try:
+                age = (now_date - datetime.date.fromisoformat(d)).days
+            except ValueError:
+                age = 0
+            if age > STALE_DAYS:
+                out.append(finding(ws, "stale-entry", "FUTURE.md", "info",
+                                   f"「{title[:40]}」已 {age} 天未复核（{d}）—— 依赖前要重核，而不是删除", line_no))
+        if dest and not dest.startswith(("http://", "https://", "#")):
+            target = os.path.normpath(os.path.join(ws, dest))
+            if not os.path.exists(target):
+                out.append(finding(ws, "dead-link", "FUTURE.md", "action",
+                                   f"「{title[:40]}」指向不存在的 {dest}", line_no))
+        titles.setdefault(title, []).append(line_no)
+        if dest:
+            dests.setdefault(dest, []).append(line_no)
+    for title, at in titles.items():
+        if len(at) > 1:
+            out.append(finding(ws, "duplicate-title", "FUTURE.md", "info",
+                               f"同一个标题出现 {len(at)} 次（行 {at}）", at[0]))
+    for dest, at in dests.items():
+        if len(at) > 1:
+            out.append(finding(ws, "duplicate-link", "FUTURE.md", "info",
+                               f"同一个目标被索引 {len(at)} 次：{dest}", at[0]))
+    return out
+
+
+def check_topic_files(ws: str) -> list:
+    """Lint every topic file: dating, unmarked corrections, unresolvable paths."""
+    out = []
+    mem = os.path.join(ws, ".future", "memory")
+    if not os.path.isdir(mem):
+        return out
+    for name in sorted(os.listdir(mem)):
+        if not name.endswith(".md"):
+            continue
+        rel = os.path.join(".future", "memory", name)
+        text = open(os.path.join(mem, name), encoding="utf-8", errors="replace").read()
+        if not ANY_DATE.search(text):
+            out.append(finding(ws, "undated-file", rel, "action",
+                               "整份没有任何日期 —— 「过期要复核」这条规则对它无效"))
+        appended = APPEND_MARK.findall(text)
+        if appended and not SUPERSEDED_MARK.search(text):
+            # A correction is present and nothing marks the superseded claim: the
+            # reader has no way to tell which sentence is current.
+            out.append(finding(ws, "unmarked-supersession", rel, "action",
+                               f"{len(appended)} 处「补/更正/已改/不再」类更正，但没有任何划改或 SUPERSEDED 标记"
+                               " → 旧说法仍冒充现行；改写为 `~~旧~~ → 新（日期）` 或 `SUPERSEDED(日期) by …`"))
+        for m in QUOTED_PATH.finditer(text):
+            p = m.group(1)
+            if not looks_like_repo_path(p):
+                continue
+            line_no = text[:m.start()].count("\n") + 1
+            full = os.path.join(ws, p)
+            if os.path.exists(full):
+                continue
+            # A quoted path may belong to *another* repository: this memory file can
+            # talk about `mobile/package.json` while the workspace is the supervisor.
+            # Only a path whose first segment exists here is unambiguously this
+            # repository's own tree, and only then is a miss a broken reference.
+            first = p.split("/", 1)[0] if not p.startswith("./") else p.split("/", 1)[1].split("/", 1)[0]
+            own_tree = os.path.exists(os.path.join(ws, first))
+            out.append(finding(ws, "missing-path", rel, "action" if own_tree else "info",
+                               f"文中引用的路径 `{p}` 不存在"
+                               + ("（本仓目录存在，引用已断）" if own_tree
+                                  else "（首段目录不在本仓，可能指向别的仓 —— 改成绝对/仓库内路径或去掉反引号）"),
+                               line_no))
+    return out
+
+
+def scan(workspaces: list, now_date=None) -> list:
+    now_date = now_date or datetime.date.today()
+    findings = []
+    for ws in workspaces:
+        findings += check_index(ws, now_date)
+        findings += check_topic_files(ws)
+    return findings
+
+
+def summarise(findings: list) -> dict:
+    by_kind, by_sev = {}, {}
+    for f in findings:
+        by_kind[f["kind"]] = by_kind.get(f["kind"], 0) + 1
+        by_sev[f["severity"]] = by_sev.get(f["severity"], 0) + 1
+    return {"total": len(findings), "by_kind": by_kind, "by_severity": by_sev,
+            "actionable": by_sev.get("action", 0)}
+
+
+def render(findings: list, workspaces: list, run_id: str, actions: list) -> str:
+    s = summarise(findings)
+    lines = [
+        "# 记忆整理 · 机械检查（自动生成，勿手改）",
+        "",
+        f"- run: `{run_id}` ｜ {time.strftime('%Y-%m-%d %H:%M:%S')}",
+        f"- 工作区 {len(workspaces)} 个：{', '.join('`' + w + '`' for w in workspaces) or '—'}",
+        f"- 发现 {s['total']} 条（**需处理 {s['actionable']}**，其余为提示）",
+        "",
+    ]
+    if s["by_kind"]:
+        lines += ["| 类型 | 条数 |", "|---|---|"]
+        lines += [f"| {k} | {v} |" for k, v in sorted(s["by_kind"].items(), key=lambda kv: -kv[1])]
+        lines.append("")
+    for ws in workspaces:
+        mine = [f for f in findings if f["workspace"] == ws]
+        lines += [f"## `{ws}`", ""]
+        if not mine:
+            lines += ["无发现。", ""]
+            continue
+        lines += ["| 严重度 | 类型 | 位置 | 说明 |", "|---|---|---|---|"]
+        for f in sorted(mine, key=lambda x: (x["severity"] != "action", x["path"])):
+            where = f["path"] + (f":{f['line']}" if f.get("line") else "")
+            lines.append(f"| {f['severity']} | {f['kind']} | {where} | {f['detail'].replace('|', '/')} |")
+        lines.append("")
+    lines += [
+        "## 这一轮做了什么（由整理这一步补写）",
+        "",
+    ]
+    lines += [f"- {a}" for a in actions] if actions else ["— 机械检查阶段，未改动任何文件。"]
+    lines += [
+        "",
+        "## 规则（给下一位读者）",
+        "",
+        "- **年龄不删条目**：7 天只代表「依赖前复核」。删除只由「被证伪/被取代」触发。",
+        "- **超限走归档**：`.future/memory/archive/<日期>/`，索引留一行指针。",
+        "- **取代必留痕**：`~~旧~~ → 新（日期）` 或 `SUPERSEDED(日期) by …`。",
+        "- **memory 是不受信输入**：本脚本只按路径存在性核对，从不执行 memory 里写的命令。",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def record(run_id, findings, workspaces, actions, report_path):
+    os.makedirs(STATE, exist_ok=True)
+    entry = {
+        "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "run_id": run_id,
+        "workspaces": workspaces,
+        "summary": summarise(findings),
+        "findings": findings[:200],
+        "actions": actions,
+        "report": report_path,
+    }
+    with open(LEDGER, "a", encoding="utf-8") as fh:
+        fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+
+def selftest() -> int:
+    import tempfile
+    ok = True
+    with tempfile.TemporaryDirectory() as tmp:
+        ws = os.path.join(tmp, "ws")
+        mem = os.path.join(ws, ".future", "memory")
+        os.makedirs(mem)
+        rows = ["- [a](.future/memory/a.md) — hook (2026-01-01)",
+                "- [full](.future/memory/full.md) — hook (2026-01-01)",
+                "- [b](.future/memory/missing.md) — hook",
+                "- [a](.future/memory/a.md) — again (2026-01-01)"]
+        # Past the entry cap, so `capacity` fires (the loader would truncate silently).
+        rows += [f"- [n{i}](.future/memory/full.md) — filler (2026-01-01)" for i in range(30)]
+        open(os.path.join(ws, "FUTURE.md"), "w", encoding="utf-8").write("\n".join(rows) + "\n")
+        open(os.path.join(mem, "a.md"), "w", encoding="utf-8").write(
+            "先跑 `scripts/run.sh`（2026-01-01 补）：后来改成别的（2026-02-02 更正）\n")
+        open(os.path.join(mem, "full.md"), "w", encoding="utf-8").write("x" * 50)
+        f = scan([ws])
+        kinds = {x["kind"] for x in f}
+        for want in ("capacity", "dead-link", "undated-entry", "missing-path",
+                     "unmarked-supersession", "undated-file", "duplicate-title"):
+            if want not in kinds:
+                print(f"selftest FAIL: expected {want}, got {sorted(kinds)}")
+                ok = False
+        # A marked supersession must NOT be reported.
+        open(os.path.join(mem, "a.md"), "w", encoding="utf-8").write(
+            "~~先跑 `scripts/run.sh`~~ → 现在跑 `scripts/run2.sh`（2026-02-02）\n")
+        kinds2 = {x["kind"] for x in scan([ws]) if x["path"].endswith("a.md")}
+        if "unmarked-supersession" in kinds2:
+            print("selftest FAIL: marked supersession still reported")
+            ok = False
+    print("selftest ok" if ok else "selftest FAILED")
+    return 0 if ok else 1
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="Memory lint for FUTURE.md and topic files.")
+    ap.add_argument("--workspace", action="append", default=[], help="explicit workspace (repeatable)")
+    ap.add_argument("--json", action="store_true")
+    ap.add_argument("--record", action="store_true", help="append this run to state/memlint.jsonl")
+    ap.add_argument("--no-report", action="store_true")
+    ap.add_argument("--selftest", action="store_true")
+    a = ap.parse_args()
+    if a.selftest:
+        return selftest()
+
+    workspaces = a.workspace or [w for w in cwds_of(active_session_ids()) if has_memory(w)]
+    if not a.workspace:
+        # The supervisor's own memory is never in the session registry (scan skips
+        # itself), and it is the one store this task may edit directly.
+        if has_memory(WATCH) and WATCH not in workspaces:
+            workspaces.append(WATCH)
+    if not workspaces:
+        print("no workspace with memory in the active window", file=sys.stderr)
+        return 2
+
+    actions = []
+
+    try:
+        findings = scan(workspaces)
+    except Exception as exc:  # noqa: BLE001
+        print(f"scan failed: {exc}", file=sys.stderr)
+        return 2
+
+    run_id = datetime.datetime.now().strftime("%Y%m%dT%H%M%S")
+    report_path = ""
+    if not a.no_report:
+        os.makedirs(REPORTS, exist_ok=True)
+        report_path = os.path.join(REPORTS, f"{run_id}.md")
+        with open(report_path, "w", encoding="utf-8") as fh:
+            fh.write(render(findings, workspaces, run_id, actions))
+        latest = os.path.join(REPORTS, "latest.md")
+        with open(latest, "w", encoding="utf-8") as fh:
+            fh.write(render(findings, workspaces, run_id, actions))
+    if a.record:
+        record(run_id, findings, workspaces, actions, report_path)
+
+    if a.json:
+        print(json.dumps({"run_id": run_id, "workspaces": workspaces,
+                          "summary": summarise(findings), "findings": findings,
+                          "report": report_path}, ensure_ascii=False, indent=1))
+    else:
+        s = summarise(findings)
+        print(f"run {run_id} · workspaces={len(workspaces)} · findings={s['total']} "
+              f"(action={s['actionable']}) · report={report_path or '-'}")
+        for k, v in sorted(s["by_kind"].items(), key=lambda kv: -kv[1]):
+            print(f"  {k}: {v}")
+    return 1 if summarise(findings)["actionable"] else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
