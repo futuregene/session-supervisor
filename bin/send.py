@@ -78,7 +78,8 @@ RELAY_HEADING = "### 会话总管转达"
 # can authorise. It is stated as a hand-back, not a prohibition, so a target with a
 # genuinely public step still gets there through this facility instead of silently.
 BOUNDARY_LINE = ("**边界** 只做正文要求的事；改远端公开状态（关/开 issue、发评论、"
-                 "对外发送）与发版、部署、删数据，先回一句，由会话总管去问用户。")
+                 "对外发送）、发版、部署、删数据，或**读凭据文件**（token / AK / SK / "
+                 "`frpc.toml` 之类），先回一句，由会话总管去问用户。")
 LEGACY_PREFIX = re.compile(r"^\[会话总管[^\]]*\]\s*")
 # A topic line written *into the body* by mistake. The header already carries one
 # (`**主题** <note>`), so a body-level line produced two of them in the delivered
