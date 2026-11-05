@@ -35,6 +35,22 @@ touch state/PAUSE                                               # 熔断：不�
 rm state/PAUSE                                                  # 解除熔断
 ```
 
+## 盲区归因：先按错误文本分组，再说话
+
+`[blind]` 窗口往往是**几起故障首尾相接**：`scan.log` 里失败行的「第一行」永远是同一句
+（`session list failed rc=1: [dns] plan=…`），真正原因在**下一行**，且不同时段可能不同。
+
+```bash
+grep -o "\[blind\] recovered after [0-9]* failing scans ([^)]*)" logs/scan.log   # 先把窗口切开
+# 失败行的下一行按「错误文本 × 小时」计数（BSD awk 可用，不用 {n} 区间）
+awk '/^20[0-9][0-9]-/{ts=substr($0,12,2); next} NF{print substr($0,1,40), "h"ts}' logs/scan.log \
+  | sort | uniq -c | sort -rn
+```
+
+- **一块一块归因**：计数最多的那一类才是该窗口的主导原因；相邻两块是不同故障时就分别说，别合成一个根因。
+- `bin/blind.py` 的建议只按**当前那一次**的错误文本分支，不覆盖历史窗口——它给的原因不能代替上面的计数。
+- 结论里必须出现**数字**（次数 / 时间窗 / 占比）。写不出数字的归因是印象，不要写进 notice / needs-you / decisions。
+
 ## 只读巡检（代答前必做）
 
 ```bash
