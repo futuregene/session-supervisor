@@ -152,3 +152,44 @@ push 自己的功能分支 → `gh pr create` → CI 全绿 → **squash 合并*
 - 用户**偶尔**说"先不要提交 PR / 等我 review"是**一次性**的：只对那次改动有效，**不要**总结成默认口径。
 - 真正需要停下来的是另一类：发版/部署/`make install`、改远端保护规则、强推、直推主干、删数据、付费、对外发送
   （`POLICY.md` §B），以及 **CI 红**（先重跑；仍红就查是既有还是本 PR 引入，**不许削断言或顺手改无关代码**）。
+## 8. 核对一个会话说「我合进去了」：按**标题与文件**核，不要按 sha 核
+
+**为什么写这一条**：核对会话自述时已经遇到两次——sha 对不上，但文件与标题都在。
+
+一个会话说「已合并进 `dev-huichen`，提交 `9b99c30e8`」。你去核：
+
+```
+git merge-base --is-ancestor 9b99c30e8 origin/dev-huichen   # → rc=1，不是祖先
+git branch -a --contains 9b99c30e8                          # → 只有本地 test/cases-content
+```
+
+看起来像"活丢了"。**但内容其实在**：同一批文件在 `origin/dev-huichen` 上都有，只是提交号不同
+（`b3b6702e3 test(harness): cover workspace lifecycle…`）。另一次：它报
+`f16d23922` / `dd477a0b2` / `45aeca921`，dev 上对应的是 `86e8cabe9` / `3bffbd844` / `c83d963d3`
+——**标题一模一样，sha 全不一样**。
+
+原因是这类工作流里，`dev-<user>` 上的提交在落地前会被 rebase 或被 squash 重写（多会话共用一条
+集成分支，或由巡检/冻结分支重放时所致）。于是会话自己记下的 sha，在它推送之后就不再存在。
+
+### 核「合入」要核三样，不核 sha
+
+1. **改了哪些文件、在不在目标分支上**（最硬）：
+   `git cat-file -e origin/<branch>:<path>`，或 `git show origin/<branch>:<path> | grep <关键串>`。
+2. **改动所声称的行为/标题在不在历史里**：`git log --oneline origin/<branch> -- <path>`，
+   看**标题**是否与自述一致。
+3. **只在需要追责时才用 sha**：`git log --grep '<原文>' --all` 找出改写后的那一条，再
+   `git show <sha> --stat` 确认是同一份改动。
+
+结论要写成这样才算"核过"：
+
+> 内容已在 `origin/dev-huichen`：`harness/README.md` 的「What the evidence cannot prove」小节存在；
+> 历史里对应标题是 `86e8cabe9 fix(harness): judge findings against the fixture, not just the screen`。
+> **会话报的 `f16d23922` 已不在 dev 上**（被 rebase 重写），不等于活丢了。
+
+### 反面：什么时候 sha 对不上**就是**问题
+
+- 文件不存在、标题也搜不到 → 真的没落地（再查它是否推到了别的分支、或 push 失败）。
+- 文件在、但内容与自述不符（说改三处只看到一处）→ 部分落地，按缺口处理。
+
+**不要**因为 sha 核不过就说"它说错了"——那会把"被 rebase 重写"误判成"没交付"，
+接下来很可能重复派一遍同样的活。
