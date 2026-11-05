@@ -60,9 +60,15 @@ def have_health() -> tuple[bool, str, float]:
     ts = float(health.get("ts") or 0.0)
     if not health.get("ok"):
         err = (health.get("error") or "ok=false").strip()
-        detail = (health.get("stderr") or "").strip().splitlines()
-        if detail:
-            err = f"{err}: {detail[0][:300]}"
+        # Last line, not first: the CLI's `[dns] plan=…` preamble is on every call,
+        # so quoting `detail[0]` reported the preamble as the fault (see
+        # `scan.err_line`). `error_line` is the scan side's answer when it has one.
+        line = (health.get("error_line") or "").strip()
+        if not line:
+            detail = [l.strip() for l in (health.get("stderr") or "").splitlines() if l.strip()]
+            line = detail[-1] if detail else ""
+        if line:
+            err = f"{err}: {line[:300]}"
         return False, err, ts
     return True, "", ts
 
@@ -105,14 +111,36 @@ def write_report(state: dict, healthy: bool) -> None:
             "影响：事件不会被扫描进来，我不会被唤醒——也就是说**我看不见任何会话**，",
             "直到 CLI 恢复。已在 `logs/scan.log` 打了 WARN。",
             "",
-            "常见原因（按概率）：`~/.future/bin/future` 被换成新构建，而正在跑的",
-            "`future host` 仍是旧镜像（版本握手失败）。修法：重启 host。",
+            f"对症的修法：{_diagnose(state.get('error', ''))}",
             "",
         ]
     tmp = REPORT + ".tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
         fh.write("\n".join(lines))
     os.replace(tmp, REPORT)
+
+
+def _diagnose(error: str) -> str:
+    """The remedy for *this* failure, not the most common one overall.
+
+    Until 2026-11-05 both the notice and `reports/blind.md` printed one fixed guess
+    ("新构建 + host 跑旧镜像 → 重启 host") for every fault. While the scanner was
+    down for six hours the real error was `unable to connect to Future Agent
+    (unix://…/agent.sock)`, so the advice sent the reader to a host that had not
+    restarted in 5 h. Reading the error first costs one `if` and saves that walk.
+    """
+    low = (error or "").lower()
+    if "agent.sock" in low or "unable to connect to future agent" in low:
+        return ("agent 连不上（`~/.future/run/agent.sock`）——agent 进程没在跑，"
+                "或刚被停掉/重启。启动 FutureOS App（或 agent）后自愈即可；"
+                "这与 `future host`（远程桌面）无关，不用重启它。")
+    if any(k in low for k in ("version", "handshake", "握手", "mismatch")):
+        return ("`~/.future/bin/future` 与正在跑的 host 版本不一致（握手失败）——"
+                "重启 host 即恢复。")
+    if "dns" in low:
+        return ("错误里只剩 CLI 的 DNS 预检行 —— 真正的原因被压在它下面："
+                "先看 `logs/scan.log` 该时刻的完整几行。")
+    return "原因未知：先看 `logs/scan.log` 该时刻的完整几行，别照抄通用建议。"
 
 
 def _ts(sec) -> str:
@@ -149,8 +177,7 @@ def main() -> int:
         state["announced"] = True
         notice(
             "⚠️ 我自己瞎了：扫描器连续失败，事件扫不进来、我不会被唤醒。"
-            f"错误：{error[:200]}。常见原因是 ~/.future/bin/future 换了新构建但 "
-            "`future host` 还在跑旧镜像（版本握手失败）——重启 host 即恢复。"
+            f"错误：{error[:200]}。{_diagnose(error)}"
             "详见 reports/blind.md。"
         )
         print(f"{time.strftime('%F %T')} [blind] WARN scanner failing x{state['count']}: {error[:200]}")

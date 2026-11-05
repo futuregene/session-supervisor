@@ -112,6 +112,21 @@ def event_key(kind, key_extra, stamp, stable=False):
     return f"{kind}|{'stable' if stable else stamp}|{key_extra}"
 
 
+def err_line(err: str) -> str:
+    """The one line of a failure's stderr worth quoting.
+
+    The CLI prints a `[dns] plan=…` preamble on *every* invocation, so the head of
+    stderr is identical for a working call and a dead agent alike. Quoting it —
+    which this code did until 2026-11-05 — left both `logs/scan.log` and the blind
+    notice saying "dns" while the real fault (`unable to connect to Future Agent
+    (unix://…/agent.sock: transport error)`) sat on the line below, and the notice
+    then guessed a remedy for the wrong fault for the whole 6 h the scanner was
+    down. The last non-empty line is where the CLI puts the actual error.
+    """
+    lines = [l.strip() for l in (err or "").splitlines() if l.strip()]
+    return lines[-1] if lines else ""
+
+
 def future(cfg, args, timeout=120):
     exe = future_exe(cfg.get("future_bin"))
     env = dict(os.environ)
@@ -259,8 +274,10 @@ def main():
 
     rc, out, err = future(cfg, ["session", "list", "--json"])
     if rc != 0:
-        log(f"session list failed rc={rc}: {err.strip()[:200]}")
-        save_json(HEALTH_PATH, {"ts": now, "ok": False, "error": f"session list rc={rc}", "stderr": err[:500]})
+        line = err_line(err)
+        log(f"session list failed rc={rc}: {line[:200]}")
+        save_json(HEALTH_PATH, {"ts": now, "ok": False, "error": f"session list rc={rc}",
+                                "error_line": line, "stderr": err[:500]})
         return 1
     try:
         all_sessions = json.loads(out).get("sessions", [])
