@@ -310,6 +310,27 @@ def render(findings: list, workspaces: list, run_id: str, actions: list) -> str:
     return "\n".join(lines)
 
 
+def save_report(path: str, body: str) -> str:
+    """One dreaming run, one report file.
+
+    The first real run scanned three workspaces by calling this script three times and
+    left three reports for one night; a reader then has to diff them to learn what
+    happened, and `latest.md` silently keeps only the last. A caller that knows its own
+    run identity passes `--run-id`, and repeated scans land in the same file as extra
+    sections; without one, the timestamp still gives a fresh name.
+    """
+    if not os.path.exists(path):
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(body)
+        return "created"
+    with open(path, encoding="utf-8", errors="replace") as fh:
+        seen = fh.read().count("### 再一次扫描")
+    with open(path, "a", encoding="utf-8") as fh:
+        fh.write(f"\n\n---\n\n### 再一次扫描（同一轮第 {seen + 2} 次）\n\n")
+        fh.write(body)
+    return "appended"
+
+
 def record(run_id, findings, workspaces, actions, report_path):
     os.makedirs(STATE, exist_ok=True)
     entry = {
@@ -349,6 +370,14 @@ def selftest() -> int:
             if want not in kinds:
                 print(f"selftest FAIL: expected {want}, got {sorted(kinds)}")
                 ok = False
+        # One dreaming run, one report file: a repeat with the same run id appends
+        # instead of producing a second file (the first real run left three).
+        rp = os.path.join(tmp, "2026-11-06T0410.md")
+        first, second = save_report(rp, "body-1"), save_report(rp, "body-2")
+        body = open(rp, encoding="utf-8").read()
+        if (first, second) != ("created", "appended") or "再一次扫描" not in body or "body-1" not in body:
+            print("selftest FAIL: report reuse")
+            ok = False
         # A marked supersession must NOT be reported.
         open(os.path.join(mem, "a.md"), "w", encoding="utf-8").write(
             "~~先跑 `scripts/run.sh`~~ → 现在跑 `scripts/run2.sh`（2026-02-02）\n")
@@ -365,6 +394,7 @@ def main() -> int:
     ap.add_argument("--workspace", action="append", default=[], help="explicit workspace (repeatable)")
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--record", action="store_true", help="append this run to state/memlint.jsonl")
+    ap.add_argument("--run-id", help="stable identity for one dreaming run; reused files are appended, not duplicated")
     ap.add_argument("--no-report", action="store_true")
     ap.add_argument("--selftest", action="store_true")
     a = ap.parse_args()
@@ -389,16 +419,15 @@ def main() -> int:
         print(f"scan failed: {exc}", file=sys.stderr)
         return 2
 
-    run_id = datetime.datetime.now().strftime("%Y%m%dT%H%M%S")
+    run_id = a.run_id or datetime.datetime.now().strftime("%Y%m%dT%H%M%S")
     report_path = ""
+    body = render(findings, workspaces, run_id, actions)
     if not a.no_report:
         os.makedirs(REPORTS, exist_ok=True)
         report_path = os.path.join(REPORTS, f"{run_id}.md")
-        with open(report_path, "w", encoding="utf-8") as fh:
-            fh.write(render(findings, workspaces, run_id, actions))
-        latest = os.path.join(REPORTS, "latest.md")
-        with open(latest, "w", encoding="utf-8") as fh:
-            fh.write(render(findings, workspaces, run_id, actions))
+        save_report(report_path, body)
+        with open(os.path.join(REPORTS, "latest.md"), "w", encoding="utf-8") as fh:
+            fh.write(body)
     if a.record:
         record(run_id, findings, workspaces, actions, report_path)
 
