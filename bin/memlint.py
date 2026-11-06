@@ -93,6 +93,17 @@ PATH_ROOTS = {".future", ".worktrees", "bin", "docs", "prompts", "scripts", "src
 # references buried the real ones under noise on the first run (2026-11-06).
 BUILD_DIRS = {"coverage", "build", "target", "outputs", "intermediates",
               "node_modules", "dist", ".next"}
+# A path that a memory file has already *told the reader is gone* is not a broken
+# reference — reporting it as actionable every night buries the real ones. Measured
+# 2026-11-07: 6 of 6 actionable `missing-path` findings in this repo were historical
+# references to deleted files (`prompts/dev-pr.md` removed in `5c7746f`, two removed
+# worktrees), all re-reported since 2026-11-06 because the text was semantically right
+# and the detector could not see the "已撤掉" next to it. Two forms are recognised,
+# both of which a reader can already follow: a struck-through span (`~~…~~`, the same
+# convention `unmarked-supersession` accepts) and an explicit removal verb on the same
+# line. Severity drops to `info` rather than disappearing, so the audit trail stays.
+STRUCK = re.compile(r"~~[^~]{1,2000}?~~", re.S)
+REMOVED = re.compile(r"已删除|已删掉|已移除|已被删除|已不存在|现已不存在|从仓库删掉|删除了|撤掉")
 
 
 def superseded_line(line: str) -> bool:
@@ -256,6 +267,8 @@ def check_topic_files(ws: str) -> list:
                                    " → 读者得自己分辨哪句现行；改写为 `~~旧~~ → 新（日期）`"
                                    " 或 `SUPERSEDED(日期) by …`",
                                    n))
+        struck = [s.span() for s in STRUCK.finditer(text)]
+        lines = text.splitlines()
         for m in QUOTED_PATH.finditer(text):
             p = m.group(1)
             if not looks_like_repo_path(p):
@@ -264,16 +277,25 @@ def check_topic_files(ws: str) -> list:
             full = os.path.join(ws, p)
             if os.path.exists(full):
                 continue
+            # Already voided in this file: either struck through, or the line itself
+            # says the path was deleted/removed. Kept as a hint, not an action, so a
+            # nightly run does not repeat a finding nobody can ever close.
+            if any(a <= m.start() < b for a, b in struck):
+                continue
+            historical = line_no <= len(lines) and bool(REMOVED.search(lines[line_no - 1]))
             # A quoted path may belong to *another* repository: this memory file can
             # talk about `mobile/package.json` while the workspace is the supervisor.
             # Only a path whose first segment exists here is unambiguously this
             # repository's own tree, and only then is a miss a broken reference.
             first = p.split("/", 1)[0] if not p.startswith("./") else p.split("/", 1)[1].split("/", 1)[0]
             own_tree = os.path.exists(os.path.join(ws, first))
-            out.append(finding(ws, "missing-path", rel, "action" if own_tree else "info",
+            sev = "action" if own_tree and not historical else "info"
+            out.append(finding(ws, "missing-path", rel, sev,
                                f"文中引用的路径 `{p}` 不存在"
                                + ("（本仓目录存在，引用已断）" if own_tree
-                                  else "（首段目录不在本仓，可能指向别的仓 —— 改成绝对/仓库内路径或去掉反引号）"),
+                                  else "（首段目录不在本仓，可能指向别的仓 —— 改成绝对/仓库内路径或去掉反引号）")
+                               + ("（同句已写明该路径已删除/撤掉，按历史引用处理；要彻底消失就划改 `~~…~~`）"
+                                  if historical else ""),
                                line_no))
     return out
 
@@ -441,6 +463,27 @@ def selftest() -> int:
                 print(f"selftest FAIL: {label}: expected flag={want}, got flag={got}")
                 ok = False
         os.remove(os.path.join(mem, "r.md"))
+        # `missing-path` after the 2026-11-07 narrowing: a reference the file itself
+        # declares void (struck through, or "已撤掉" on the line) must stop being an
+        # action, while a live broken reference must stay one. Both directions pinned —
+        # narrowing until nothing fires would pass the first half and detect nothing.
+        # `bin` exists in the fake workspace so these paths are unambiguously its own tree.
+        os.makedirs(os.path.join(ws, "bin"), exist_ok=True)
+        open(os.path.join(ws, "bin", "keep.sh"), "w").write("#!/bin/sh\n")
+        path_cases = [
+            ("活引用·断链", "产物在 `bin/gone.sh`（2026-01-01）\n", "action"),
+            ("已划改", "~~`bin/gone.sh`~~ → 已并入 `bin/keep.sh`（2026-01-02）\n", None),
+            ("同句写明已删除", "旧的 `bin/gone.sh` 已在 `abcdef1` 撤掉（2026-01-02）\n", "info"),
+        ]
+        for label, body, want in path_cases:
+            open(os.path.join(mem, "p.md"), "w", encoding="utf-8").write(
+                f"# p\n\n复核（2026-01-01）\n\n{body}")
+            got = [x["severity"] for x in scan([ws])
+                   if x["path"].endswith("p.md") and x["kind"] == "missing-path"]
+            if (got[0] if got else None) != want:
+                print(f"selftest FAIL: {label}: expected {want}, got {got}")
+                ok = False
+        os.remove(os.path.join(mem, "p.md"))
     print("selftest ok" if ok else "selftest FAILED")
     return 0 if ok else 1
 
