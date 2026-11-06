@@ -269,16 +269,49 @@ def main() -> int:
     # a probe against a dead port must actually come back inside the budget
     st, pend = tmp_paths()
     t0 = time.monotonic()
-    SP.probe(now=6_000_000, probe_gap_seconds=0, state_path=st, pending_path=pend,
-             health_url="http://127.0.0.1:9/health",
-             stats_fn=lambda: {"state": "skipped", "reason": "no-cli"})
+    absent = SP.probe(now=6_000_000, probe_gap_seconds=0, state_path=st, pending_path=pend,
+                      health_url="http://127.0.0.1:9/health",
+                      stats_fn=lambda: {"state": "skipped", "reason": "no-cli"})
     elapsed = time.monotonic() - t0
-    check("a dead service returns promptly (not a slow scan)", elapsed < 2.0, f"{elapsed:.2f}s")
+    check("a dead service returns promptly (not a slow scan)", elapsed < 4.5, f"{elapsed:.2f}s")
+
+    # Nothing listening *and* no `life-search` to maintain an index: this machine has
+    # no indexer, so there is nothing to degrade. It used to wake at `high` every 3 h
+    # (measured 2026-11-06: CLI absent, 8010 refused).
+    check("a machine with no indexer is not degraded",
+          absent["criteria"] == [], f"{absent['criteria']}")
+    check("and it writes no event", count(pend) == 0, f"events={count(pend)}")
+
+    # The moment the indexer exists, the same dead port is an outage again.
+    st, pend = tmp_paths()
+    gone = SP.probe(now=6_000_000, probe_gap_seconds=0, state_path=st, pending_path=pend,
+                    health_url="http://127.0.0.1:9/health",
+                    stats_fn=lambda: {"state": "ok", "parsed": {}})
+    check("with a CLI, the same dead port is degraded",
+          [c["criterion"] for c in gone["criteria"]] == ["embed-refused"],
+          f"{gone['criteria']}")
 
     # the event the probe writes must be one the inbox can read back
     rows = events(pend)
     check("the written event parses as an inbox row with an id",
           bool(rows) and rows[0]["id"].startswith("ev_") and rows[0]["summary"], f"{rows}")
+
+    # A *hang* is still a timeout: the port accepts the connect and never answers, so
+    # the second look says "open" and the signature stays the flaky-gated one.
+    import socket as _socket
+    srv = _socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(8)
+    try:
+        hang = SP.http_health(f"http://127.0.0.1:{srv.getsockname()[1]}/health", timeout=0.5)
+    finally:
+        srv.close()
+    check("an open port that never answers is embed-timeout",
+          hang["signature"] == "embed-timeout", f"{hang}")
+
+    # The classifier this whole path rests on, against a port with nothing on it.
+    check("port_state sees a closed loopback port as refused",
+          SP.port_state("http://127.0.0.1:9/health") == "refused", "")
 
     print(f"\n{len(FAILS)} failure(s)")
     return 1 if FAILS else 0

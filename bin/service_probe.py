@@ -57,10 +57,12 @@ import random
 import re
 import shutil
 import string
+import socket
 import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 WATCH = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -78,6 +80,10 @@ HEALTH_TIMEOUT = 1.0  # a local /health answers in ms (measured 4 ms); down is d
                      # The budget is HEALTH + STATS <= TOTAL_BUDGET, so the stats
                      # probe gets the room instead — it is the one that runs a CLI.
 STATS_TIMEOUT = 4.0
+#: The second look at a timed-out /health: a connect to a closed local port needs
+#: ~2.0 s on Windows before it is refused (see `port_state`). Only the failure path
+#: pays it — a healthy answer arrives in 4 ms.
+PORT_TIMEOUT = 2.5
 
 #: Signatures that can mean nothing more than "this one call was slow". Measured on
 #: this machine: `life-search stats` is 0.1–1.6 s warm and a cold first call passes
@@ -219,6 +225,53 @@ def classify_health(code, body, elapsed=None):
     return out
 
 
+def port_state(url=None, timeout=PORT_TIMEOUT):
+    """Whether anything is listening at all: `open` / `refused` / `timeout` / `other`.
+
+    Windows needs this second look. A connect to a *closed* local port sits in SYN
+    retry for ~2.0 s before `WSAECONNREFUSED` (measured twice on 2026-11-06), which
+    is longer than the 1 s `/health` ceiling — so a service that is simply not
+    running came back as `embed-timeout`, a `FLAKY_SIGS` entry that is only ever
+    supposed to mean "this one call was slow", and got deferred instead of being
+    reported as the definitive `embed-refused` it is.
+
+    Costs ~2 s, so it only runs on the failure path (where the stats probe is
+    skipped anyway) and never on a healthy answer that takes 4 ms.
+    """
+    parsed = urllib.parse.urlsplit(url or HEALTH_URL)
+    host = parsed.hostname or "127.0.0.1"
+    port = parsed.port or 80
+    sock = socket.socket()
+    try:
+        sock.settimeout(timeout)
+        sock.connect((host, port))
+        return "open"
+    except ConnectionRefusedError:
+        return "refused"
+    except (TimeoutError, socket.timeout):
+        return "timeout"
+    except OSError:
+        return "other"
+    finally:
+        sock.close()
+
+
+def _health_failure(reason, elapsed, url, timeout):
+    """One failure verdict, with the refused/timeout split done properly.
+
+    A closed local port on Windows needs ~2.0 s to say `WSAECONNREFUSED` (measured
+    twice on 2026-11-06), longer than the `/health` ceiling — so the call comes back
+    as "timed out" and would read as the flaky `embed-timeout` although the service
+    is definitively not running. Ask the port itself in that one case: a refusal is
+    never a blip.
+    """
+    out = _unreachable(reason, elapsed)
+    if out.get("signature") == "embed-timeout" and port_state(url) == "refused":
+        out.update(signature="embed-refused",
+                   reason=f"/health {timeout}s 内无响应，端口拒绝连接（服务没在跑）")
+    return out
+
+
 def http_health(url=None, timeout=HEALTH_TIMEOUT):
     """Ask the embedding service how it is. Never raises: a failure is a verdict."""
     url = url or HEALTH_URL
@@ -232,14 +285,11 @@ def http_health(url=None, timeout=HEALTH_TIMEOUT):
             raw = exc.read(4096) or b""
         except Exception:  # noqa: BLE001
             raw = b""
+        return classify_health(code, raw.decode("utf-8", "replace"), time.monotonic() - t0)
     except urllib.error.URLError as exc:
-        return _unreachable(exc.reason, time.monotonic() - t0)
-    except TimeoutError:
-        return {"state": "failed", "signature": "embed-timeout",
-                "reason": f"/health 超过 {timeout}s 无响应",
-                "elapsedMs": round((time.monotonic() - t0) * 1000)}
-    except OSError as exc:
-        return _unreachable(exc, time.monotonic() - t0)
+        return _health_failure(exc.reason, time.monotonic() - t0, url, timeout)
+    except (TimeoutError, OSError) as exc:
+        return _health_failure(exc, time.monotonic() - t0, url, timeout)
     return classify_health(code, raw.decode("utf-8", "replace"), time.monotonic() - t0)
 
 
@@ -315,6 +365,23 @@ def run_stats(cli="auto", timeout=STATS_TIMEOUT):
 # ----------------------------------------------------------------------- verdict
 
 
+def capability_absent(health, stats):
+    """True when this machine has no indexer at all — not a degraded one.
+
+    No `life-search` CLI *and* nothing listening on the embedder's port: there is no
+    index here to degrade. The probe used to call that a failed embedder and wake at
+    `high` every `report_gap_seconds` (3 h) for a capability that was never installed
+    — measured 2026-11-06 on this machine, where `life-search` is not on PATH and
+    8010 refuses connections.
+
+    Deliberately narrow: the moment *either* half exists (a CLI that can report, a
+    port that answers), a silent embedder is a real outage again.
+    """
+    return (health.get("signature") == "embed-refused"
+            and stats.get("state") == "skipped"
+            and stats.get("reason") == "no-cli")
+
+
 def criteria(health, stats):
     """Which criteria say "degraded", with the sentence that justifies each.
 
@@ -324,6 +391,8 @@ def criteria(health, stats):
     now failing).
     """
     out = []
+    if capability_absent(health, stats):
+        return out
     if health.get("state") == "failed":
         out.append({"criterion": health.get("signature") or "embed-unreachable",
                     "why": health.get("reason") or (health.get("signature") or "")})
