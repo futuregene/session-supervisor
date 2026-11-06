@@ -74,8 +74,19 @@ PENDING_PATH = os.path.join(WATCH, "inbox", "pending.jsonl")
 #: The embedding service the index depends on.
 HEALTH_URL = "http://127.0.0.1:8010/health"
 #: Per-call ceilings. Together with the total budget below they bound one probe.
-HEALTH_TIMEOUT = 1.5
-STATS_TIMEOUT = 3.0
+HEALTH_TIMEOUT = 1.0  # a local /health answers in ms (measured 4 ms); down is down.
+                     # The budget is HEALTH + STATS <= TOTAL_BUDGET, so the stats
+                     # probe gets the room instead — it is the one that runs a CLI.
+STATS_TIMEOUT = 4.0
+
+#: Signatures that can mean nothing more than "this one call was slow". Measured on
+#: this machine: `life-search stats` is 0.1–1.6 s warm and a cold first call passes
+#: 3 s while the indexer holds the database. On 2026-11-06 a single 3.0 s timeout
+#: raised a high-priority wake while `/health` was answering in 4 ms — a false
+#: alarm that costs a whole run. So these have to be seen twice, one probe apart,
+#: before they count; a real hang fails both. Connection refusals are *not* here:
+#: they come back instantly and are never a blip.
+FLAKY_SIGS = {"stats-timeout", "stats-error", "embed-timeout"}
 #: One probe may never hold up the 30 s scan (the brief's red line).
 TOTAL_BUDGET = 5.0
 #: Same failure signature reported at most this often (config can override).
@@ -433,6 +444,20 @@ def probe(now=None, report_gap_seconds=REPORT_GAP_SECONDS, probe_gap_seconds=PRO
         "criteria": [c["criterion"] for c in crit],
         "lastError": last_error_text(health, stats)[:300],
     }
+
+    # A one-off slowness must not page anyone: see FLAKY_SIGS. The pending map holds
+    # exactly the signature we are waiting to see again, so "slow, then slow" is news
+    # and "slow, then fine" is not.
+    pending = dict(state.get("pending") or {})
+    if crit and {c["criterion"] for c in crit} <= FLAKY_SIGS:
+        if not pending.get(sig):
+            state["pending"] = {sig: now}
+            out["deferred"] = ("first observation of a one-off signature; "
+                               "waiting for the next probe to confirm")
+            save_state(state, state_path)
+            return out
+    if pending:
+        state["pending"] = {}
 
     if not crit:
         # Recovery clears the memory of what was already reported. Without this the

@@ -230,13 +230,31 @@ def main() -> int:
     check("a missing life-search CLI is a skip, not an event",
           count(pend) == 0 and res["criteria"] == [] and res["statsState"] == "skipped", f"{res}")
 
+    # A one-off slow/failed stats call is not a fault: 2026-11-06 a single 3.0 s
+    # timeout woke the supervisor while /health answered in 4 ms. It takes two
+    # consecutive probes to become an event — and "slow, then fine" must stay silent.
+    slow = lambda: {"state": "failed", "signature": "stats-error",
+                    "reason": "search server unreachable"}
     st, pend = tmp_paths()
-    res = SP.probe(now=5_100_000, probe_gap_seconds=0, state_path=st, pending_path=pend,
-                   health_fn=healthy,
-                   stats_fn=lambda: {"state": "failed", "signature": "stats-error",
-                                     "reason": "search server unreachable"})
-    check("a failing life-search CLI is degraded (the pipeline is visible either way)",
-          count(pend) == 1 and "stats-error" in res["signature"], f"{res['signature']}")
+    first = SP.probe(now=5_100_000, probe_gap_seconds=0, state_path=st, pending_path=pend,
+                     health_fn=healthy, stats_fn=slow)
+    check("the first slow stats call only defers (no event, no page)",
+          count(pend) == 0 and first.get("deferred"),
+          f"events={count(pend)} deferred={first.get('deferred')!r}")
+
+    second = SP.probe(now=5_100_060, probe_gap_seconds=0, state_path=st, pending_path=pend,
+                      health_fn=healthy, stats_fn=slow)
+    check("a second consecutive failure is degraded (the pipeline is visible either way)",
+          count(pend) == 1 and "stats-error" in second["signature"], f"{second['signature']}")
+
+    st, pend = tmp_paths()
+    SP.probe(now=5_100_000, probe_gap_seconds=0, state_path=st, pending_path=pend,
+             health_fn=healthy, stats_fn=slow)
+    back = SP.probe(now=5_100_060, probe_gap_seconds=0, state_path=st, pending_path=pend,
+                    health_fn=healthy,
+                    stats_fn=lambda: {"state": "ok", "parsed": {}})
+    check("a slow call that recovers never becomes an event",
+          count(pend) == 0 and back["criteria"] == [], f"events={count(pend)} {back['criteria']}")
 
     # The real classifier, over a real socket: port 9 on loopback has nothing on it,
     # so this is a local refusal — no packet leaves the host.
