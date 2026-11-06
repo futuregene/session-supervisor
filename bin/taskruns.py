@@ -193,6 +193,13 @@ def collect(cfg=None, state=None, now_ms=None, force=False, fetch=True):
         return [], st
     every = int(cfg.get("task_review_every_runs", 6))
     max_hours = float(cfg.get("task_review_max_hours", 24))
+    # Floor between two reviews of the same task. `every` counts *runs*, so its wall-clock
+    # meaning depends on the trigger: six runs of a daily task is six days, six runs of an
+    # hourly task is six hours. Without a floor an hourly task is reviewed four times a day
+    # on the same unchanged ledger (2026-11-06: the PR-sweep task was reviewed at 15:19,
+    # 21:21 and again at 03:18, six consecutive empty rounds each time). 0 = no floor, which
+    # is what the selftests use; deployments set it in bin/config.json.
+    min_hours = float(cfg.get("task_review_min_hours", 0) or 0)
     cap = int(cfg.get("task_run_seen_cap", 40))
     events = []
     if not fetch:
@@ -257,7 +264,12 @@ def collect(cfg=None, state=None, now_ms=None, force=False, fetch=True):
         runs_since = int(rec.get("runsSinceReview") or 0)
         stale_review = (max_hours > 0 and runs_since > 0
                         and (now_ms - int(rec.get("lastReviewMs") or now_ms)) >= max_hours * 3600_000)
-        due = runs_since >= every or int(rec.get("failureStreak") or 0) >= 2 or stale_review
+        # A run-count review is throttled by the floor; a failure streak is not — two
+        # failures in a row are worth telling someone about now, not in twelve hours.
+        reviewed_recently = (min_hours > 0 and rec.get("lastReviewMs")
+                             and (now_ms - int(rec["lastReviewMs"])) < min_hours * 3600_000)
+        due = ((runs_since >= every or stale_review) and not reviewed_recently) \
+            or int(rec.get("failureStreak") or 0) >= 2
         # One pending review per task; a review that was emitted, acked and then
         # forgotten comes back once another `every` runs have piled up on top of it.
         if due and (not rec.get("reviewPending")

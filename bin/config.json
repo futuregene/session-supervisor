@@ -52,6 +52,7 @@
   "task_poll_seconds": 120,
   "task_review_every_runs": 6,
   "task_review_max_hours": 24,
+  "task_review_min_hours": 12,
   "task_run_seen_cap": 40,
   "balance_probe_enabled": true,
   "balance_probe_minutes": 10,

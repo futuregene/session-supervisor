@@ -131,6 +131,39 @@ def main() -> int:
         got += [e["kind"] for e in ev]
     check("two failures in a row -> review", "task_review" in got, f"{got}")
 
+    # 8b. the run-count review is throttled by a floor, because `every` counts runs and
+    # its wall-clock meaning depends on the trigger: six runs of a daily task is six days,
+    # six runs of an hourly task is six hours. Without the floor an hourly task is reviewed
+    # four times a day over the same unchanged ledger.
+    st5 = {}
+    led5 = [run("e1")]
+    mod.fetch_runs = lambda _cfg, _tid, limit=20: list(reversed(led5))
+    cfg_floor = {"task_review_every_runs": 2, "task_poll_seconds": 0, "task_review_min_hours": 12}
+    mod.collect(cfg_floor, state=st5, now_ms=50_000, force=True, fetch=True)  # baseline
+    led5 += [run("e2"), run("e3")]
+    six_h = 6 * 3600_000
+    ev, st5 = mod.collect(cfg_floor, state=st5, now_ms=50_000 + six_h, force=True, fetch=True)
+    check("floor: threshold reached but reviewed recently -> no review",
+          [e for e in ev if e["kind"] == "task_review"] == [],
+          f"{[e['kind'] for e in ev]}")
+    check("floor: the debt is still counted while throttled",
+          st5["tasks"]["tsk_demo"]["runsSinceReview"] == 2,
+          f"{st5['tasks']['tsk_demo']['runsSinceReview']}")
+    ev, st5 = mod.collect(cfg_floor, state=st5, now_ms=50_000 + 13 * 3600_000,
+                          force=True, fetch=True)
+    check("floor: past the floor the review fires",
+          len([e for e in ev if e["kind"] == "task_review"]) == 1, f"{[e['kind'] for e in ev]}")
+
+    # 8c. a failure streak ignores the floor: two failures in a row are worth saying now
+    st6 = {}
+    led6 = [run("f1")]
+    mod.fetch_runs = lambda _cfg, _tid, limit=20: list(reversed(led6))
+    mod.collect(cfg_floor, state=st6, now_ms=60_000, force=True, fetch=True)  # baseline
+    led6 += [run("f2", "failed", "", err="502"), run("f3", "failed", "", err="502")]
+    ev, st6 = mod.collect(cfg_floor, state=st6, now_ms=60_000 + 600_000, force=True, fetch=True)
+    check("floor does not silence a failure streak",
+          "task_review" in [e["kind"] for e in ev], f"{[e['kind'] for e in ev]}")
+
     # 9. digest: one file to read instead of N runs, with the repetition analysis
     import json as _json
     mod.future = lambda _cfg, _args, timeout=30: (
