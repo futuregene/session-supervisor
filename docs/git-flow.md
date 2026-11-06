@@ -135,6 +135,33 @@ git worktree prune && git fetch --prune
 - 收尾核对：`git worktree list` 只剩主 checkout、`git status --short` 干净、
   `git log --oneline -1 origin/main` = 刚合并的结果。
 
+### 4.1 判「这条分支 / 工作树已落地」只有一种判据：内容
+
+清理之前最容易问错的是「它落地了吗」。在 squash 合并 + 集成分支反复重置成主干 的流程下，
+下面三条**看着能回答它、实际不能**：
+
+- `git merge-base --is-ancestor <br> <main>`：squash 换了 SHA，已落地的分支**仍**不是祖先
+  （rc=1 从不证明没落地）。
+- `git diff --quiet <main> <br>`（两杠）：比的是两棵完整树，分支从旧集成点切出，
+  就必然带着主干之后的全部差异。
+- `git diff --quiet <main>...<br>`（三杠）：量的是分支自身增量，只要有提交就非空，
+  **与是否落地无关**。
+
+能回答的只有两条：
+
+```bash
+# ① 廉价正向信号：delete_branch_on_merge 会把远端 ref 收掉
+git rev-parse --verify -q "refs/remotes/origin/<br>" || echo "远端 ref 已消失（落地过的常见痕迹）"
+# ② 硬判据：分支动过的文件，内容是否已在主干（逐文件比 blob；再不行用 git log -S 找落地提交）
+git diff --name-only "<main>...<br>" | while read -r f; do
+  [ "$(git rev-parse "<br>:$f" 2>/dev/null)" = "$(git rev-parse "<main>:$f" 2>/dev/null)" ] \
+    || echo "not identical: $f"
+done
+```
+
+一个恒为假（或恒为真）的判据比没有更糟——这与 `branch-empty` 探针被明确判为「不判」同源
+（见 [architecture.md](architecture.md)）；核会话自述「我合进去了」也是同一条（§8）。
+
 
 
 ## 7. 无 CI 的仓也要有闸门
