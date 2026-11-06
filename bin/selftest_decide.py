@@ -464,6 +464,65 @@ with tempfile.TemporaryDirectory() as tmp:
     check("an unreadable status still wakes", len(calls), 1)
     check("and its event stays pending", pending_ids(tmp), ["ev_1"])
 
+# ── a high/medium batch nobody acked backs off instead of re-waking ─────────
+# Measured 2026-11-06: one `high` event stayed pending (a round that never acked
+# it) and the `events` branch — which has no `has_new_pending` guard — woke a run
+# every `min_wake_gap_seconds` (120 s) from 03:00 to 17:18, ≈170 wakes in a day;
+# the 08:10 "woken 60 times" history reset was its cost. A batch that is still
+# uncleared may deserve another attempt (the round could have died mid-way), so
+# the fix is a backoff, not a filter.
+HIGH_EV = {"id": "ev_hi", "kind": "run_error", "priority": "high", "sessionId": "s1",
+           "sessionName": "n", "summary": "s"}
+
+
+def _set_last_wake(tmp, ago_seconds):
+    with open(os.path.join(tmp, "state", "wakes.jsonl"), "w", encoding="utf-8") as fh:
+        fh.write(json.dumps({"ts": _time.time() - ago_seconds, "reason": "events",
+                             "pending": 1, "highMedium": 1}) + "\n")
+
+
+def _streak(tmp):
+    path = os.path.join(tmp, "state", "pending_seen.json")
+    if not os.path.exists(path):
+        return None
+    return json.load(open(path, encoding="utf-8")).get("eventStaleStreak")
+
+
+with tempfile.TemporaryDirectory() as tmp:
+    backoff = {"min_wake_gap_seconds": 0, "event_rewake_minutes": 15,
+               "event_rewake_max_minutes": 60, "heartbeat_minutes": 0}
+    rc, calls = run_main(tmp, lambda argv, **kw: None, pending_rows=(HIGH_EV,),
+                         cfg_extra=backoff)
+    check("an acked-never high event wakes the first time", len(calls), 1)
+    check("the first wake starts the stale streak at zero", _streak(tmp), 0)
+
+    # Same batch, 2 minutes later: under the old rule this woke again.
+    _set_last_wake(tmp, 121)
+    rc, calls = run_main(tmp, lambda argv, **kw: None, pending_rows=(HIGH_EV,),
+                         cfg_extra=backoff)
+    check("the same batch does not re-wake after min_wake_gap_seconds", len(calls), 0)
+    check("and the log names the backoff", "backoff" in log_text(tmp), True)
+
+    # Past the first retry window (15 min) it tries again, and counts the streak.
+    _set_last_wake(tmp, 901)
+    rc, calls = run_main(tmp, lambda argv, **kw: None, pending_rows=(HIGH_EV,),
+                         cfg_extra=backoff)
+    check("the first retry fires after event_rewake_minutes", len(calls), 1)
+    check("the stale streak advances", _streak(tmp), 1)
+
+    # Second retry window doubles to 30 min: 15 min in is still too early.
+    _set_last_wake(tmp, 901)
+    rc, calls = run_main(tmp, lambda argv, **kw: None, pending_rows=(HIGH_EV,),
+                         cfg_extra=backoff)
+    check("the window doubles after the first retry", len(calls), 0)
+
+    # A *new* id is news again, whatever the streak says.
+    _set_last_wake(tmp, 130)
+    fresh_ev = dict(HIGH_EV, id="ev_hi2")
+    rc, calls = run_main(tmp, lambda argv, **kw: None, pending_rows=(HIGH_EV, fresh_ev),
+                         cfg_extra=backoff)
+    check("a new pending id still takes the fast path", len(calls), 1)
+
 print()
 if FAILED:
     print(f"FAILED ({len(FAILED)}):")

@@ -20,6 +20,8 @@
   "monitor_reset_in_place": true,
   "monitor_reset_keep_last": 2,
   "min_wake_gap_seconds": 120,
+  "event_rewake_minutes": 15,
+  "event_rewake_max_minutes": 60,
   "max_status_checks_per_cycle": 8,
   "max_wakes_per_hour": 12,
   "max_wakes_per_day": 400,

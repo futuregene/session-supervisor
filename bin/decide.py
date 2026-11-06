@@ -474,9 +474,26 @@ def main():
     per_day = sum(1 for w in wakes if float(w.get("ts") or 0) > day_ago)
 
     pending_ids = [e.get("id") for e in pending if e.get("id")]
-    fresh = has_new_pending(pending_ids, load_json(PENDING_SEEN, {}).get("ids"))
+    seen_state = load_json(PENDING_SEEN, {})
+    fresh = has_new_pending(pending_ids, seen_state.get("ids"))
     gap = float(cfg.get("min_wake_gap_seconds", 150))
     hb = float(cfg.get("heartbeat_minutes", 60)) * 60
+    # Backoff for a *stale* high/medium batch (measured 2026-11-06).
+    #
+    # `has_new_pending` guards the heartbeat branch but not this one: a high
+    # event that a round failed to ack stayed "interesting" and woke a turn
+    # every `min_wake_gap_seconds` (120 s) from 03:00 to 17:18 — ≈170 wakes in
+    # one day, and the 08:10 "woken 60 times" history reset was its cost. A
+    # batch nobody has cleared yet still deserves another attempt (the round may
+    # have died mid-way), so this is a *backoff*, not a filter: first retry
+    # after `event_rewake_minutes`, doubling, capped at `event_rewake_max_minutes`.
+    # A genuinely new pending id (`fresh`) keeps the fast path: back to `gap`.
+    stale_streak = 0 if fresh else int(seen_state.get("eventStaleStreak") or 0)
+    event_gap = gap
+    rewake_base = float(cfg.get("event_rewake_minutes", 15)) * 60
+    if not fresh and pending_ids and rewake_base > 0:
+        rewake_cap = float(cfg.get("event_rewake_max_minutes", 60)) * 60
+        event_gap = min(rewake_base * (2 ** min(stale_streak, 10)), rewake_cap)
     # v4 (user 2026-10-15): "low 有可能也要及时回复，我需要这个 agent 能够主动些" —
     # a *new* low event still deserves a prompt reply, so low has no separate slow
     # schedule: it wakes on the same 5-minute cadence as high/medium. What the
@@ -487,11 +504,16 @@ def main():
     # behaviour, at ≈¥28/day.
     low_cadence = float(cfg.get("low_wake_minutes", 0)) * 60
     reason = None
-    if interesting and (now - last_ts) >= gap:
+    if interesting and (now - last_ts) >= event_gap:
         if per_hour < int(cfg.get("max_wakes_per_hour", 8)) and per_day < int(cfg.get("max_wakes_per_day", 60)):
             reason = "events"
         else:
             log(f"event wake suppressed by rate cap (hour={per_hour} day={per_day}) pending={len(pending)}")
+    elif interesting:
+        # Same high/medium batch as the last wake, still uncleared: wait out the
+        # backoff instead of spending a run every `min_wake_gap_seconds`.
+        log(f"event wake deferred: no new pending id, backoff {int(event_gap)}s "
+            f"(streak={stale_streak}, {int(now - last_ts)}s since last wake)")
     elif pending and (now - last_ts) >= gap:
         # only low-priority events: no dedicated wake (they ride the heartbeat)
         pass
@@ -603,8 +625,14 @@ def main():
         fh.write(json.dumps({"ts": now, "reason": reason, "pending": len(pending),
                              "highMedium": len(interesting)}) + "\n")
     try:
+        if reason == "events":
+            next_streak = 0 if fresh else stale_streak + 1
+        elif not pending_ids:
+            next_streak = 0
+        else:
+            next_streak = stale_streak
         with open(PENDING_SEEN, "w", encoding="utf-8") as fh:
-            json.dump({"ts": now, "ids": pending_ids}, fh)
+            json.dump({"ts": now, "ids": pending_ids, "eventStaleStreak": next_streak}, fh)
     except Exception:  # noqa: BLE001
         log("could not record state/pending_seen.json; heartbeat falls back to no-op wakes")
     log(f"woke supervisor: reason={reason} pending={len(pending)} highMedium={len(interesting)}")

@@ -18,7 +18,8 @@
 | 扫描间隔 | 无模型调用的巡检循环 | `config.scan_interval_seconds`、`bin/watchd.sh` |
 | 事件唤醒最小间隔 | 一个事件唤醒后，下一轮至少隔这么久 | `config.min_wake_gap_seconds` |
 | 唤醒上限 | 每小时/每天封顶，超出即 suppressed 并记日志 | `config.max_wakes_per_hour/day`、`bin/decide.py` |
-| high/medium 事件 | 立刻唤醒，只受最小间隔约束 | `bin/decide.py`、`NOTIFY_PRIORITY` |
+| high/medium 事件 | **新**事件（`has_new_pending`）立刻唤醒，只受最小间隔约束 | `bin/decide.py`、`NOTIFY_PRIORITY` |
+| **同一批 high/medium 一直没被 ack** | **退避重试**，不是每 `min_wake_gap_seconds` 醒一次：首次重试 `event_rewake_minutes`（15 分钟），之后翻倍，封顶 `event_rewake_max_minutes`（1 小时）；出现新 id 立刻回到快路径。连续次数记在 `state/pending_seen.json` 的 `eventStaleStreak`，pending 清空即归零 | `config.event_rewake_minutes/max_minutes`、`bin/decide.py` |
 | **事件所属会话正在跑** | **不作为唤醒理由**：`awaiting_user` 的前提（已停下等回复）在用户回一句后就失效，此刻也发不出消息（只会排队）。事件**不 ack、留在 pending**，会话空闲后下一轮照常唤醒 | `bin/decide.py` 的 `session_states()`、`config.max_status_checks_per_cycle` |
 | **事件所属会话已经不存在** | **ack 掉、不唤醒**：`session retention = delete` 的定时任务一轮跑完即删会话，而它在删掉前几秒已经发过 `awaiting_user`；那轮本身由任务台账（`taskruns.py`）看着。事件进 `handled.jsonl`（可审计），日志写明会话数与 id | `bin/decide.py` 的 `session_states()`、`bin/selftest_decide.py` |
 | low 事件 | 只有**新** low 事件才唤醒（`has_new_pending`），另受抖动闸限制，最坏延迟 `config.low_wake_minutes` | `bin/decide.py`、`bin/selftest_decide.py` |
