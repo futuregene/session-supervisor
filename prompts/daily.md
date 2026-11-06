@@ -152,15 +152,14 @@
   - 正文不要重复标题（推去掉首行 H1 的副本）。
   - 写前确认连的是他在看的那台服务端（`life-docs list` 时间戳带 `+0800` 通常是生产）；拿不准**就不要推**并说明。
   - 不要把 token 打进任何输出或参数；推送失败如实写进简报与最终回复。
-- 按分支规范进 `main`（**不要**在主 checkout 直接 commit）：
-  ```bash
-  cd ~/session-supervisor && git fetch origin --prune
-  git worktree add --no-track .worktrees/daily-$(date +%F) -b chore/daily-$(date +%F) origin/main
-  ```
-  在 worktree 里写简报 → `python3 bin/selfcheck.py` 全绿 → commit → push → `gh pr create --base main --fill`
-  → `gh pr checks <n> --watch --required` → `gh pr merge <n> --squash`。
-  收尾：`git fetch origin --prune && git merge --ff-only origin/main`、`git worktree remove …`、
-  `git branch -D chore/daily-$(date +%F)`。
+- **简报与记录不进 git**：`journal/`、`reports/` 都在 `.gitignore` 里（`git ls-files reports` 恒为 0），
+  所以写完、推完 Life Journal 就结束，**不要为简报开 worktree / 开 PR**——简报没有任何可提交的内容，
+  走那条路每天只会撞上一次空 diff 的 `commit` 失败。（2026-11-06 复盘发现：这里原先写着
+  `git worktree add … -b chore/daily-$(date +%F)` → 在 worktree 里写简报 → commit → PR → merge，
+  而 `reports/` 早已移出 git，那段每天空跑，已删。）
+- 只有当你**改了设施本身**（`bin/`、`docs/`、`prompts/`、`AGENTS.md`、`POLICY.md`、`bin/config.json`）
+  才走 [docs/git-flow.md](docs/git-flow.md) 的 worktree + 分支 + PR + CI，合完再记一行 `journal/`。
+  那种改动与简报是两件事：分开做、分开记，别为了"顺手提交"把简报拖进去。
 
 ## 最终回复（≤10 行）
 
