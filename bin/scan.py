@@ -29,6 +29,12 @@ import taskruns  # noqa: E402
 # machine's own runs accounted for 2.12 of them, and no local table could say when
 # the money left. Guarded by its own gap, so the 30 s scan does not flood the log.
 import balance_probe  # noqa: E402
+# An outside look at the embedding service and the index it feeds. `KeepAlive`
+# restart-loops a service that dies during import without reporting it — that is how
+# the embedding service stayed dead for about two weeks while every index run failed
+# with `connection refused` and 1313 recordings never entered the index. The probe is
+# silent unless a criterion says degraded, so its normal output costs one line here.
+import service_probe  # noqa: E402
 
 # Locating `future`/`python3`: discovery, not a hardcoded Homebrew path (see toolpath.py).
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -648,6 +654,29 @@ def main():
                 log(f"balance sample skipped: {res}")
         except Exception as exc:  # noqa: BLE001
             log(f"balance sample skipped ({type(exc).__name__}: {exc})")
+
+    # --- embedding service / index probe ------------------------------------
+    # The one failure no local signal can see: a launchd service whose process keeps
+    # dying and restarting looks "present" to launchctl, while the port never binds.
+    # Only an outside probe that asks the service to answer — and asks the index how
+    # far behind it is — can report it. It rides this scan (no second scheduler) but
+    # keeps its own cadence, and it writes an event only when degraded: silence is
+    # its default output, which is why a healthy scan costs one skipped line at most.
+    if not baseline and cfg.get("service_probe_enabled", True):
+        try:
+            res = service_probe.probe(
+                probe_gap_seconds=int(float(cfg.get("service_probe_minutes", 5)) * 60),
+                report_gap_seconds=int(float(cfg.get("service_probe_report_minutes", 180)) * 60))
+            if res.get("emitted"):
+                log(f"service probe: DEGRADED {res.get('signature')} "
+                    f"-> event {res['emitted'][0]}")
+            elif res.get("suppressed"):
+                log(f"service probe: degraded {res.get('signature')}, already reported "
+                    f"{res.get('reportedAgoSeconds')}s ago")
+            elif res.get("skipped") not in ("fresh", None):
+                log(f"service probe skipped: {res.get('skipped')}")
+        except Exception as exc:  # noqa: BLE001 — never cost the scan a round
+            log(f"service probe skipped ({type(exc).__name__}: {exc})")
     state["lastScanTs"] = now
 
     # prune very old session state (but never while the list is degraded: a session

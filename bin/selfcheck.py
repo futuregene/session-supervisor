@@ -343,6 +343,40 @@ def check_trigger_selftest() -> tuple[bool, str]:
     return p.returncode == 0, (tail[-1] if tail else f"exit {p.returncode}")
 
 
+def check_service_probe_selftest() -> tuple[bool, str]:
+    """The silent-failure probe: quiet when healthy, exactly one event when not.
+
+    `KeepAlive` restart-loops a service that dies during import without reporting
+    anything, so the embedding service stayed dead for about two weeks: every index
+    run failed with `connection refused`, 1313 recordings never entered the index,
+    and no event said so. A detector for that class has two ways to fail invisibly:
+    it wakes on a healthy service (an expensive false alarm every gap), or it stops
+    firing (the original silence, now with a script implying otherwise). Both are
+    pinned in `selftest_service_probe.py`; the wiring below keeps the scan calling it
+    and the config carrying its knobs.
+    """
+    p = run([sys.executable, os.path.join(ROOT, "bin", "selftest_service_probe.py")])
+    tail = (p.stdout or "").strip().splitlines()
+    if p.returncode != 0:
+        return False, (tail[-1] if tail else f"exit {p.returncode}")
+    problems = []
+    try:
+        cfg = json.load(open(os.path.join(ROOT, "bin", "config.json"), encoding="utf-8"))
+    except Exception as exc:  # noqa: BLE001
+        return False, f"bin/config.json unreadable: {exc}"
+    for key in ("service_probe_minutes", "service_probe_report_minutes"):
+        if not isinstance(cfg.get(key), (int, float)) or cfg.get(key) <= 0:
+            problems.append(f"bin/config.json: {key} missing or off")
+    if cfg.get("service_probe_enabled") is not True:
+        problems.append("bin/config.json: service_probe_enabled is not true by default")
+    scan_src = open(os.path.join(ROOT, "bin", "scan.py"), encoding="utf-8").read()
+    if "import service_probe" not in scan_src or "service_probe.probe(" not in scan_src:
+        problems.append("bin/scan.py no longer calls the service probe")
+    if 'cfg.get("service_probe_enabled"' not in scan_src:
+        problems.append("bin/scan.py does not read service_probe_enabled from config")
+    return (not problems), ("; ".join(problems) if problems else (tail[-1] if tail else "ok"))
+
+
 def check_send_selftest() -> tuple[bool, str]:
     """The timing rule for relays: never send into a session that is mid-run.
 
@@ -754,6 +788,7 @@ CHECKS = [
     ("notice/directives selftest", check_notice_selftest),
     ("taskruns selftest", check_taskruns_selftest),
     ("balance-log selftest", check_balance_log_selftest),
+    ("service probe selftest", check_service_probe_selftest),
     ("send selftest", check_send_selftest),
     ("dispatch selftest", check_dispatch_selftest),
     ("trigger selftest", check_trigger_selftest),

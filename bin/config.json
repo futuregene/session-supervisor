@@ -52,5 +52,8 @@
   "task_review_max_hours": 24,
   "task_run_seen_cap": 40,
   "balance_probe_enabled": true,
-  "balance_probe_minutes": 10
+  "balance_probe_minutes": 10,
+  "service_probe_enabled": true,
+  "service_probe_minutes": 5,
+  "service_probe_report_minutes": 180
 }

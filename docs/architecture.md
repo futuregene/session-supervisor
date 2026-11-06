@@ -84,6 +84,7 @@ runbooks/supervisor-daemon.md）——只负责让下一行一直活着
 | `task_run_empty` | medium | 定时任务“完成”了但无任何输出 | 查是否被指示“无需动作就不输出” |
 | `task_review` | medium | 定时任务已积累 N 轮未复盘 | 读 `taskruns.py digest`，改就改提示词，最后 `reviewed <id>` |
 | `external` | 按 `trust` 封顶 | 外部应用（GitHub/CI/IM/邮件/脚本）投递的一条事实 | 先按 `detail.payload_ref` 读正文再判断；`action_class=observe` 时只记录；不需要动作就 ack |
+| `service_degraded` | high | 服务探针判本机某个服务/索引退化（`detail.criteria` 说哪一条） | 只读探针已给出失败日期与最后错误；重启服务、补索引是**另一个决定**，按 `POLICY.md` 走 |
 
 同一会话同一状态只报一次（去重键含事件类型、时间戳与 ordinal，见 `scan.py::emit`）。
 `awaiting_user` 在**唤醒之前**还多一道闸：非提问且该会话正在被用户连续使用（窗口内多次 completed run）→
@@ -118,6 +119,7 @@ Windows 编译错误上，后到的那个只能把先到者的提交再验一遍
 | `state/external-seen.jsonl` | 外部事件已接收的 `dedupe_key → id`，只追加；跨进程去重的唯一依据（`bin/trigger.py`） |
 | `state/external/` | 外部事件的全文载荷（`<sha16>.json`），卡上只引用不展开 |
 | `state/approvals.jsonl` | 自动批准的逐条明细 |
+| `state/service-probe.json` | 服务探针的节奏与「已报过的签名」；一次健康探测会清空后者（`bin/service_probe.py`） |
 | `state/monitor_session.txt` | 总管会话 id（wake 目标；轮换后由 `monitor_roll.py` 改写） |
 | `state/agent.lock` | 单飞锁（易变，gitignore） |
 | `state/turn_payload.json` | 本次唤醒的载荷（易变，gitignore）。**不作为附件发给会话**——`bin/turn_prompt.py` 把它渲染成消息里的「待处理事件」小节；事件全文用 `bin/inbox.py list --json` 按需取 |
