@@ -100,6 +100,9 @@
 3. **替用户做的决策**：当天写进 `reports/decisions/YYYY-MM-DD.md`，一条一行 =
    **做了什么 / 依据 / 你若要回退怎么撤**。只记**可回退的实质决策**；"只 ack、不介入"只记 `journal/`。
    用户回"哪几条要回退"，照做并把结论写回该文件。
+   **执行步骤是发消息/开新会话的，先做再写**：`reports/decisions/` 与 `journal/` 都不进唤醒卡
+   （卡只渲染 `deferred-sends` 与未关闭的派工），所以写"下一轮唤醒派给 X"等于不派；
+   发不出去（对方在跑、等验收）就落 `state/deferred-sends.jsonl`，下一轮卡会重提。
 4. **自动批准**：由 `bin/approvals.py` 写 `state/approvals.jsonl` + `reports/approvals.md`，不要手写。
 
 ## 5. future 技能在本工作区的用法
