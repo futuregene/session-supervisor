@@ -558,21 +558,36 @@ def main(argv):
         return 0
     if cmd == "list":
         st = load_json(STATE_PATH, {})
+        # Which of the ledger's tasks still exist? A deleted task keeps its record: the
+        # ledger is append-only history, so `硬盘清理（每 3 小时）` stayed in `list` for a
+        # day after the user removed it and a review read it as live work. Ask the CLI
+        # once; if it is unavailable, say so instead of silently claiming they all exist.
+        live_ids, live_why = None, ""
+        try:
+            tasks, live_why = fetch_tasks(cfg)
+            live_ids = {t.get("id") for t in tasks if t.get("id")}
+        except Exception as exc:  # noqa: BLE001 - display must not die with the CLI
+            live_why = str(exc)
         rows = []
         for tid, rec in (st.get("tasks") or {}).items():
             rows.append({"taskId": tid, "name": rec.get("name"), "trigger": rec.get("trigger"),
                          "runsSinceReview": rec.get("runsSinceReview"),
                          "failureStreak": rec.get("failureStreak"),
                          "reviewPending": bool(rec.get("reviewPending")),
-                         "lastRunId": rec.get("lastRunId")})
+                         "lastRunId": rec.get("lastRunId"),
+                         "inRegistry": None if live_ids is None else tid in live_ids})
         if as_json:
             print(json.dumps(rows, ensure_ascii=False, indent=1))
         else:
             for r in rows:
                 # Print the id whole: the resolver rejects an id that is not the one
                 # in the registry, and a truncated one looks usable but is not.
+                gone = "已删除（台账保留）" if r["inRegistry"] is False else ""
                 print(f"{r['taskId']} {r['name']} · 未复盘 {r['runsSinceReview']} · "
-                      f"连续失败 {r['failureStreak']} · {'待复盘' if r['reviewPending'] else ''}")
+                      f"连续失败 {r['failureStreak']} · {'待复盘' if r['reviewPending'] else ''}"
+                      + (f" · {gone}" if gone else ""))
+            if live_ids is None:
+                print(f"-- 活任务名单取不到，上面未标「已删除」：{live_why}")
             print(f"-- {len(rows)} task(s)")
         return 0
     if cmd == "digest":

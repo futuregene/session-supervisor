@@ -298,6 +298,36 @@ def main() -> int:
           rev8 and "小时未复盘" in (rev8[0]["detail"].get("dueReason") or ""),
           f"{rev8 and rev8[0]['detail'].get('dueReason')}")
 
+    # 11. `list` says which records are no longer real tasks. The ledger is append-only,
+    # so a task the user deleted keeps its row; without this mark a review reads it as
+    # live work (a deleted 3-hourly cleanup task sat in `list` for a day that way).
+    import contextlib
+    import io
+    mod.save_json(str(mod.STATE_PATH), {"tasks": {
+        "tsk_live": {"name": "活任务", "runsSinceReview": 0, "failureStreak": 0,
+                     "reviewPending": False},
+        "tsk_gone": {"name": "已删任务", "runsSinceReview": 3, "failureStreak": 0,
+                     "reviewPending": False}}})
+    mod.fetch_tasks = lambda _cfg: ([{"id": "tsk_live", "name": "活任务"}], "")
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        mod.main(["list"])
+    out = buf.getvalue()
+    check("list marks a record whose task is gone", "已删任务" in out and "已删除" in out, out)
+    check("list does not mark a live task as deleted",
+          not any("已删除" in ln for ln in out.splitlines() if "活任务" in ln), out)
+
+    def _boom(_cfg):
+        raise RuntimeError("cli unavailable")
+
+    mod.fetch_tasks = _boom
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        mod.main(["list"])
+    out = buf.getvalue()
+    check("list says so when the live task list cannot be read",
+          "活任务名单取不到" in out and "cli unavailable" in out, out)
+
     print(f"\n{'ALL OK' if not FAILS else str(len(FAILS)) + ' FAILED'}")
     return 0 if not FAILS else 1
 
