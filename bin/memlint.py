@@ -102,8 +102,12 @@ BUILD_DIRS = {"coverage", "build", "target", "outputs", "intermediates",
 # both of which a reader can already follow: a struck-through span (`~~…~~`, the same
 # convention `unmarked-supersession` accepts) and an explicit removal verb on the same
 # line. Severity drops to `info` rather than disappearing, so the audit trail stays.
+# 2026-11-08: `已删` alone was missing, so the natural phrasing `已删的 X` (and `已删掉`)
+# re-created two actionable findings from the very paragraph that recorded them as
+# historical — twice in one night, while editing that paragraph. The bare stem covers
+# `已删的` / `已删掉` / `已删除`; no line uses it to mean anything else.
 STRUCK = re.compile(r"~~[^~]{1,2000}?~~", re.S)
-REMOVED = re.compile(r"已删除|已删掉|已移除|已被删除|已不存在|现已不存在|从仓库删掉|删除了|撤掉")
+REMOVED = re.compile(r"已删|已移除|已被删除|已不存在|现已不存在|从仓库删掉|删除了|撤掉")
 
 
 def superseded_line(line: str) -> bool:
@@ -474,6 +478,7 @@ def selftest() -> int:
             ("活引用·断链", "产物在 `bin/gone.sh`（2026-01-01）\n", "action"),
             ("已划改", "~~`bin/gone.sh`~~ → 已并入 `bin/keep.sh`（2026-01-02）\n", None),
             ("同句写明已删除", "旧的 `bin/gone.sh` 已在 `abcdef1` 撤掉（2026-01-02）\n", "info"),
+            ("同句写明已删的（2026-11-08 补的常见措辞）", "旧的 `bin/gone.sh`：已删的版本见 journal（2026-01-02）\n", "info"),
         ]
         for label, body, want in path_cases:
             open(os.path.join(mem, "p.md"), "w", encoding="utf-8").write(
