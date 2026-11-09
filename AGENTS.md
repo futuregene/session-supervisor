@@ -103,6 +103,9 @@
    **执行步骤是发消息/开新会话的，先做再写**：`reports/decisions/` 与 `journal/` 都不进唤醒卡
    （卡只渲染 `deferred-sends` 与未关闭的派工），所以写"下一轮唤醒派给 X"等于不派；
    发不出去（对方在跑、等验收）就落 `state/deferred-sends.jsonl`，下一轮卡会重提。
+   **发出之后要自己核落地**：凡批准或发出的"去改 X"（文件、配置、分支、PR），**下一次唤醒先读 X 本身**，
+   不等对方回报——对方回"已改好"只是它那一轮的观测，中间可能有别的写入方、缓存，或它根本没改成。
+   读一次是一行命令（`grep -n` / `git log` / `gh pr view`），比用户撞上一次失败便宜得多。
 4. **自动批准**：由 `bin/approvals.py` 写 `state/approvals.jsonl` + `reports/approvals.md`，不要手写。
 
 ## 5. future 技能在本工作区的用法
