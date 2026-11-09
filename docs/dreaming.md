@@ -47,7 +47,7 @@
   两个方向都由 `bin/memlint.py --selftest` 钉住，`bin/selfcheck.py` 会实际跑它。
 - **阶段 2 · 语义整理（模型，只处理阶段 1 报出的条目）**：同一话题两份文件互相否定、
   索引行与话题文件不一致 → 合并/标取代；**只在本仓 `.future/memory/` 与 `FUTURE.md`
-  上直接改**，别仓的 `FUTURE.md` 进 git，只能出 PR 提案。
+  上直接改**；别仓的 `FUTURE.md` **要先判它在不在版本控制内**（`git -C <仓> check-ignore -v FUTURE.md .future`，见下节「派工前先判」）——被跟踪才出 PR 提案，被 `.gitignore` 挡住就改前 `cp -p` 备份、改完贴 diff 与备份路径，**别承诺开不出来的 PR**（`future-os` 实测：`FUTURE.md` 与 `.future/` 分别被 `.gitignore:97`/`:42` 忽略）。
 
 ## 谁能改什么
 
