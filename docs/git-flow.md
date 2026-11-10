@@ -162,6 +162,27 @@ done
 一个恒为假（或恒为真）的判据比没有更糟——这与 `branch-empty` 探针被明确判为「不判」同源
 （见 [architecture.md](architecture.md)）；核会话自述「我合进去了」也是同一条（§8）。
 
+### 4.2 开 PR 之前也先核一遍内容，而且要对**所有**集成分支核
+
+给一条「推上去了但没有 PR」的分支补开 PR 之前，先按 §4.1 的逐文件 blob 比对，比对对象是
+**所有可能承载同一份内容的集成分支**，而不只是 `main`：
+
+```bash
+for base in origin/main origin/dev-huichen; do
+  echo "== $base"
+  git diff --name-only "$base...origin/<br>" | while read -r f; do
+    [ "$(git rev-parse "origin/<br>:$f" 2>/dev/null)" = "$(git rev-parse "$base:$f" 2>/dev/null)" ] \
+      || echo "not identical: $f"
+  done
+done
+```
+
+实测教训：一条 ad-hoc 分支上「没有 PR、也没有 CI 跑过」时，给这条分支补开 PR 看似是唯一出路；
+但那条分支上的提交很可能早已被另一个会话 rebase 到集成分支（SHA 不同、内容在），
+于是开出来的 PR 只是重复，很快被关成 duplicate。
+**「没有 PR」只证明没有 PR，不证明内容没落地**；ad-hoc 分支在 `dev-huichen` 这类模式下，
+多半正是绕开某个推送限制推的。
+
 
 
 ## 7. 无 CI 的仓也要有闸门
