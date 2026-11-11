@@ -50,6 +50,15 @@
 看待处理事件（唤醒卡里已渲染；要全文才 `list --json`）→ 逐条处置 → `bin/inbox.py ack <id>` →
 `python3 bin/lock.py release` → 按 `git status` 决定是否 commit。一次唤醒最多 5 个会话、25 次工具调用。
 
+> **先读这次唤醒迟到了多久。** `logs/scan.log` 里的 `resync scan (gap Ns > 300s)` 与
+> `[blind] recovered after N failing scans (起 → 止)` 是**上一段空窗的欠账提示**，不是日志噪声：
+> 出现了就先算清"瞎了多久、为什么"，再处置事件。三种静默判据不同，"机器关着"只是其中一种、且要先证：
+> 机器看 `last reboot` / `who -b` 与 `pmset -g log | grep -E "Sleep|Wake"`（没有 `Sleep` 行＝没睡过）；
+> 守护看 `logs/watchd.log` 的 `start pid=` 行，以及那一段有没有 `already running`（整段没有＝launchd 没加载）；
+> CLI 看 `grep -c "session list failed" logs/scan.log` 与该错误的首末时刻。
+> `reports/blind.md` 的"连续 N 次"按**同一错误串**连计，错误一变就归零，恢复后一次异串失败就会把
+> 整段覆盖掉——要窗口长度就读上面那两行，不要读这个计数。
+
 > **kind → 处置对照**（细节见 `docs/architecture.md`）：
 > `approval_pending` 已由 `bin/approvals.py` 处理，知悉即可；`run_error`/`failed_run` 能纠就发一条、否则升级；
 > `awaiting_user` + `questionLike` 证据可推则代答并推进，涉及用户私人事实/偏好或白名单则升级；
