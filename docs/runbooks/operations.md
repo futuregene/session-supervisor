@@ -16,7 +16,7 @@ LABEL=$(basename "$HOME/Library/LaunchAgents/"*.session-watch.plist .plist)
 
 ```bash
 cat state/health.json                                          # ts 应在 5 分钟内；ok 应为 true
-launchctl print gui/$(id -u)/$LABEL | grep 'state ='   # 应为 running
+launchctl print gui/$(id -u)/$LABEL | grep -E 'state =|runs =|properties ='   # 旁证；可能报 125，见下节
 cat state/watchd.pid; ps -p "$(cat state/watchd.pid)"           # watchd 进程存活
 tail -5 logs/scan.log logs/decide.log                           # 最近每轮扫描/唤醒决策
 python3 bin/lock.py status                                      # free / 被某 pid 持有
@@ -130,15 +130,28 @@ git rev-list --left-right --count origin/main...main   # 必须是 0 0，才算�
 **不要直接 reset**——那可能是别的回合的有效工作。按 [git-flow.md](../git-flow.md) §4 把它转成 PR 送进主干，
 或逐项核对内容已在远端后再对齐（来由见 `.future/memory/incidents/`）。
 
-## 存活判据：不要用 `launchctl print`
+## 存活判据：`liveness.py` 为准；`launchctl print` 只回答「我的 plist 改动生效了没有」
 
-**何时读**：怀疑设施没在跑、或要写/改"自检存活"的检查时。
+**何时读**：怀疑设施没在跑、或要改 plist、"自检存活"的检查时。
 
-- **用** `python3 bin/liveness.py`（`--ensure` 会直接把 `bin/watchd.sh` 拉起来）。
+- **存活用** `python3 bin/liveness.py`（`--ensure` 会直接把 `bin/watchd.sh` 拉起来）。
   它只用设施自己产出的证据：`state/health.json` 新鲜（默认 180s）且 `ok=true` + `state/watchd.pid` 的进程活着。
-- **不要用** `launchctl print gui/$(id -u)/$LABEL`：在总管自己的上下文里它回
-  `125: Domain does not support specified action`，**输出永远一样**，因此**报不出 watcher 已死**。
-  同日 `launchctl list`（97 个服务）里也看不到该 label，`launchctl load -w` 无可见效果。
-  ⇒ 该 launchd 任务的监督状态**无法从总管上下文证实或证伪**；需要真人在他自己的终端里确认。
+- **`launchctl print gui/$(id -u)/$LABEL` 报不出"watcher 已死"，但它能回答另一个问题**，所以两种回答都要认：
+  - 它**可能**回 `125: Domain does not support specified action`（在 launchd 派生的上下文里见过），
+    **也可能**正常输出 `state = running` / `runs = N` / `properties = …`（在总管自己的交互 shell 里见过）。
+    ⇒ "它输出永远一样"是错的；先跑一次看它这次给不给答案，别把"它没用"当成已知。
+  - 给答案时，**`properties` 是唯一能证明"plist 里的改动到底被读进去了没有"的地方**：
+    改 plist 文件**不等于生效**——launchd 只在 `bootstrap` 那一刻读它，之后手工编辑同一个文件，
+    `properties` 里不会长出新加的那一项（`runs = N` 也会一直停着不动）。
+    要生效必须 `bootout` + `bootstrap`（这会重启守护，属有副作用的动作），改完再
+    `launchctl print … | grep -o 'properties = .*'` 里看见它，才可以说"加上了这条保险"。
+- **GUI 会话域里的 `KeepAlive` / `StartInterval` 只救"进程死了、域还活着"。**
+  域本身被销毁时（登录会话被重建：`loginwindow transformation` 会连带撤掉该域内所有 job），
+  域内没有任何属性能把守护拉回来。这种空窗的签名是**日志里一行都没有**（不是失败刷屏）：
+  `watchd.log` 与 `scan.log` 同时空白，恢复后只有一行 `resync scan (gap …)`，
+  而 `[blind] recovered after N failing scans` 的 N 很小甚至为 0——**它数的是尝试次数，不是时长**。
+  处置只有两条：重建会话，或把守护放进系统域（需要 root，属要用户点头的事）。
+  归因命令：`log show --start … --predicate 'eventMessage CONTAINS "loginwindow transformation"'`，
+  看那一刻前后 LaunchAgent 是否**同时**启动（同时启动＝域被重建，不是某个任务崩了）。
 - 教训：**一个不会失败的检查不是检查**——设施曾静默停摆数小时（`scan.log` 一行都没有），
   而那套"自检存活"当时给不出任何信号。所以存活判据必须来自设施自己产出的、会过期的证据。
