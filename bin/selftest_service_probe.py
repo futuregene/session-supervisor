@@ -37,6 +37,12 @@ def check(name: str, ok: bool, detail: str = "") -> None:
         FAILS.append(name)
 
 
+# The load seam is pinned to "an idle machine" here: on 2026-11-12 a 30-worker search
+# pushed load to 88 on 32 cpus, and every timeout case below would otherwise change
+# verdict depending on what else was running. Case 4b flips it on purpose.
+CALM = lambda: (0.0, 32)
+
+
 def load():
     spec = importlib.util.spec_from_file_location("service_probe", ROOT / "bin" / "service_probe.py")
     mod = importlib.util.module_from_spec(spec)
@@ -144,7 +150,7 @@ def main() -> int:
 
     # ------------------------------------------------------- 1. healthy is silent
     st, pend = tmp_paths()
-    res = SP.probe(now=1_000_000, probe_gap_seconds=0, state_path=st, pending_path=pend,
+    res = SP.probe(load_fn=CALM, now=1_000_000, probe_gap_seconds=0, state_path=st, pending_path=pend,
                    health_fn=healthy, stats_fn=lambda: stats_ok())
     check("healthy: zero events", count(pend) == 0 and res["emitted"] == [], f"{res}")
     check("healthy: no criteria", res["criteria"] == [], f"{res['criteria']}")
@@ -153,7 +159,7 @@ def main() -> int:
 
     # ------------------------------------------- 2. refused reports exactly once
     st, pend = tmp_paths()
-    res = SP.probe(now=2_000_000, probe_gap_seconds=0, state_path=st, pending_path=pend,
+    res = SP.probe(load_fn=CALM, now=2_000_000, probe_gap_seconds=0, state_path=st, pending_path=pend,
                    health_fn=refused, stats_fn=lambda: stats_ok())
     check("refused: one event", count(pend) == 1 and len(res["emitted"]) == 1, f"{res}")
     ev = events(pend)[0]
@@ -165,32 +171,32 @@ def main() -> int:
           and "refused" in ev["detail"]["lastError"] and ev["detail"]["probedAt"],
           json.dumps(ev["detail"], ensure_ascii=False)[:300])
 
-    res2 = SP.probe(now=2_000_000 + 60, probe_gap_seconds=0, state_path=st, pending_path=pend,
+    res2 = SP.probe(load_fn=CALM, now=2_000_000 + 60, probe_gap_seconds=0, state_path=st, pending_path=pend,
                     health_fn=refused, stats_fn=lambda: stats_ok())
     check("refused again 60 s later: no second event (gap guard)",
           count(pend) == 1 and res2["suppressed"] is True, f"{res2}")
 
     # the probe cadence is its own guard: a fresh probe is skipped before any I/O
     called = []
-    res3 = SP.probe(now=2_000_000 + 90, probe_gap_seconds=300, state_path=st, pending_path=pend,
+    res3 = SP.probe(load_fn=CALM, now=2_000_000 + 90, probe_gap_seconds=300, state_path=st, pending_path=pend,
                     health_fn=lambda: called.append(1) or refused(), stats_fn=lambda: stats_ok())
     check("inside the probe gap nothing is probed at all",
           res3.get("skipped") == "fresh" and not called, f"{res3}")
 
     # ---------------------------------------------- 3. recovery clears the memory
-    res = SP.probe(now=2_000_000 + 200, probe_gap_seconds=0, state_path=st, pending_path=pend,
+    res = SP.probe(load_fn=CALM, now=2_000_000 + 200, probe_gap_seconds=0, state_path=st, pending_path=pend,
                    health_fn=healthy, stats_fn=lambda: stats_ok())
     check("recovery: no event and the signature is forgotten",
           count(pend) == 1 and res["emitted"] == [] and res["recovered"] == ["embed-refused"],
           f"{res}")
-    res = SP.probe(now=2_000_000 + 260, probe_gap_seconds=0, state_path=st, pending_path=pend,
+    res = SP.probe(load_fn=CALM, now=2_000_000 + 260, probe_gap_seconds=0, state_path=st, pending_path=pend,
                    health_fn=refused, stats_fn=lambda: stats_ok())
     check("a second outage after recovery reports again (state was cleared)",
           count(pend) == 2 and len(res["emitted"]) == 1, f"{count(pend)} events")
 
     # ------------------------------- 4. the index's own numbers can be the verdict
     st, pend = tmp_paths()
-    res = SP.probe(now=3_000_000, probe_gap_seconds=0, state_path=st, pending_path=pend,
+    res = SP.probe(load_fn=CALM, now=3_000_000, probe_gap_seconds=0, state_path=st, pending_path=pend,
                    health_fn=healthy, stats_fn=lambda: stats_ok(STATS_FAILED))
     ev = events(pend)
     check("failed dates > 0 is judged degraded on its own",
@@ -210,21 +216,21 @@ def main() -> int:
     only_lag = STATS_HEALTHY.replace("  状态:       ✅ 就绪，索引已跟上",
                                      "  状态:       ⚠️  就绪，但落后 3 天（410 条尚未进索引）")
     st, pend = tmp_paths()
-    res = SP.probe(now=4_000_000, probe_gap_seconds=0, state_path=st, pending_path=pend,
+    res = SP.probe(load_fn=CALM, now=4_000_000, probe_gap_seconds=0, state_path=st, pending_path=pend,
                    health_fn=healthy, stats_fn=lambda: stats_ok(only_lag))
     check("lag alone degrades (behind 3 days, 410 pending)",
           len(events(pend)) == 1 and "index-behind" in res["signature"], f"{res['signature']}")
     one_day = STATS_HEALTHY.replace("  状态:       ✅ 就绪，索引已跟上",
                                     "  状态:       ⚠️  就绪，但落后 1 天（40 条尚未进索引）")
     st, pend = tmp_paths()
-    res = SP.probe(now=4_100_000, probe_gap_seconds=0, state_path=st, pending_path=pend,
+    res = SP.probe(load_fn=CALM, now=4_100_000, probe_gap_seconds=0, state_path=st, pending_path=pend,
                    health_fn=healthy, stats_fn=lambda: stats_ok(one_day))
     check("daily churn (behind 1 day, 40 items) is not degraded",
           len(events(pend)) == 0 and res["criteria"] == [], f"{res['criteria']}")
 
     # --------------------------- 5. skips, loading, and the 5 s budget
     st, pend = tmp_paths()
-    res = SP.probe(now=5_000_000, probe_gap_seconds=0, state_path=st, pending_path=pend,
+    res = SP.probe(load_fn=CALM, now=5_000_000, probe_gap_seconds=0, state_path=st, pending_path=pend,
                    health_fn=lambda: SP.classify_health(503, '{"status":"loading"}'),
                    stats_fn=lambda: {"state": "skipped", "reason": "no-cli"})
     check("a missing life-search CLI is a skip, not an event",
@@ -235,22 +241,43 @@ def main() -> int:
     # consecutive probes to become an event — and "slow, then fine" must stay silent.
     slow = lambda: {"state": "failed", "signature": "stats-error",
                     "reason": "search server unreachable"}
+
+    # 4b. The same two slow probes on a *saturated* machine stay quiet: measured
+    # 2026-11-12, `stats-timeout` fired at load 88 (a 30-worker search) and again at
+    # load 77 (an eval sweep) while `/health` answered in 37 ms and the same call read
+    # 0.32 s a minute later. Deferral, not suppression — the pending flag survives, so
+    # a slowdown that outlives the load still reports on the probe after next.
+    BUSY = lambda: (88.0, 32)
     st, pend = tmp_paths()
-    first = SP.probe(now=5_100_000, probe_gap_seconds=0, state_path=st, pending_path=pend,
+    SP.probe(load_fn=BUSY, now=5_200_000, probe_gap_seconds=0, state_path=st,
+             pending_path=pend, health_fn=healthy, stats_fn=slow)
+    busy = SP.probe(load_fn=BUSY, now=5_200_060, probe_gap_seconds=0, state_path=st,
+                    pending_path=pend, health_fn=healthy, stats_fn=slow)
+    check("a saturated machine defers a slow call instead of paging",
+          count(pend) == 0 and busy.get("deferred") and "load 88" in busy["deferred"],
+          f"events={count(pend)} deferred={busy.get('deferred')!r}")
+    still = SP.probe(load_fn=CALM, now=5_200_120, probe_gap_seconds=0, state_path=st,
+                     pending_path=pend, health_fn=healthy, stats_fn=slow)
+    check("the pending flag survives the load, so a real slowdown still reports after it",
+          count(pend) == 1 and "stats-error" in still["signature"],
+          f"events={count(pend)} signature={still['signature']}")
+
+    st, pend = tmp_paths()
+    first = SP.probe(load_fn=CALM, now=5_100_000, probe_gap_seconds=0, state_path=st, pending_path=pend,
                      health_fn=healthy, stats_fn=slow)
     check("the first slow stats call only defers (no event, no page)",
           count(pend) == 0 and first.get("deferred"),
           f"events={count(pend)} deferred={first.get('deferred')!r}")
 
-    second = SP.probe(now=5_100_060, probe_gap_seconds=0, state_path=st, pending_path=pend,
+    second = SP.probe(load_fn=CALM, now=5_100_060, probe_gap_seconds=0, state_path=st, pending_path=pend,
                       health_fn=healthy, stats_fn=slow)
     check("a second consecutive failure is degraded (the pipeline is visible either way)",
           count(pend) == 1 and "stats-error" in second["signature"], f"{second['signature']}")
 
     st, pend = tmp_paths()
-    SP.probe(now=5_100_000, probe_gap_seconds=0, state_path=st, pending_path=pend,
+    SP.probe(load_fn=CALM, now=5_100_000, probe_gap_seconds=0, state_path=st, pending_path=pend,
              health_fn=healthy, stats_fn=slow)
-    back = SP.probe(now=5_100_060, probe_gap_seconds=0, state_path=st, pending_path=pend,
+    back = SP.probe(load_fn=CALM, now=5_100_060, probe_gap_seconds=0, state_path=st, pending_path=pend,
                     health_fn=healthy,
                     stats_fn=lambda: {"state": "ok", "parsed": {}})
     check("a slow call that recovers never becomes an event",
@@ -269,7 +296,7 @@ def main() -> int:
     # a probe against a dead port must actually come back inside the budget
     st, pend = tmp_paths()
     t0 = time.monotonic()
-    absent = SP.probe(now=6_000_000, probe_gap_seconds=0, state_path=st, pending_path=pend,
+    absent = SP.probe(load_fn=CALM, now=6_000_000, probe_gap_seconds=0, state_path=st, pending_path=pend,
                       health_url="http://127.0.0.1:9/health",
                       stats_fn=lambda: {"state": "skipped", "reason": "no-cli"})
     elapsed = time.monotonic() - t0
@@ -284,7 +311,7 @@ def main() -> int:
 
     # The moment the indexer exists, the same dead port is an outage again.
     st, pend = tmp_paths()
-    gone = SP.probe(now=6_000_000, probe_gap_seconds=0, state_path=st, pending_path=pend,
+    gone = SP.probe(load_fn=CALM, now=6_000_000, probe_gap_seconds=0, state_path=st, pending_path=pend,
                     health_url="http://127.0.0.1:9/health",
                     stats_fn=lambda: {"state": "ok", "parsed": {}})
     check("with a CLI, the same dead port is degraded",

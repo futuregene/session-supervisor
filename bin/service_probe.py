@@ -93,6 +93,19 @@ PORT_TIMEOUT = 2.5
 #: before they count; a real hang fails both. Connection refusals are *not* here:
 #: they come back instantly and are never a blip.
 FLAKY_SIGS = {"stats-timeout", "stats-error", "embed-timeout"}
+
+
+def machine_load():
+    """(1-minute load average, cpu count) — 0.0/0 when the platform says nothing.
+
+    Used to tell "this call was slow" from "everything on this machine is slow".
+    Never raises: a probe must not fail because `getloadavg` is unavailable.
+    """
+    try:
+        load1 = os.getloadavg()[0]
+    except (OSError, AttributeError):
+        load1 = 0.0
+    return float(load1 or 0.0), int(os.cpu_count() or 0)
 #: One probe may never hold up the 30 s scan (the brief's red line).
 TOTAL_BUDGET = 5.0
 #: Same failure signature reported at most this often (config can override).
@@ -465,7 +478,7 @@ def build_event(sig, crit, health, stats, ts):
 
 def probe(now=None, report_gap_seconds=REPORT_GAP_SECONDS, probe_gap_seconds=PROBE_GAP_SECONDS,
           health_url=None, cli="auto", state_path=None, pending_path=None,
-          health_fn=None, stats_fn=None, budget=TOTAL_BUDGET):
+          health_fn=None, stats_fn=None, budget=TOTAL_BUDGET, load_fn=None):
     """Probe once. Writes at most one event; returns what it found.
 
     Returns one of:
@@ -477,6 +490,8 @@ def probe(now=None, report_gap_seconds=REPORT_GAP_SECONDS, probe_gap_seconds=PRO
 
     `health_fn` / `stats_fn` exist so the selftest can drive every branch without a
     server and without a real `life-search`; the defaults are the real probes.
+    `load_fn` is the same seam for `machine_load()` — without it this suite's verdict
+    would depend on whatever else is running on the machine.
     """
     now = time.time() if now is None else float(now)
     state_path = state_path or STATE_PATH
@@ -523,6 +538,21 @@ def probe(now=None, report_gap_seconds=REPORT_GAP_SECONDS, probe_gap_seconds=PRO
             state["pending"] = {sig: now}
             out["deferred"] = ("first observation of a one-off signature; "
                                "waiting for the next probe to confirm")
+            save_state(state, state_path)
+            return out
+        # Two slow probes in a row are normally news, but these thresholds are
+        # stopwatches and a saturated machine slows every local call: measured
+        # 2026-11-12, `stats-timeout` fired at load 88 (a 30-worker search) and
+        # again at load 77 (the user's own eval sweep) while `/health` answered in
+        # 37 ms and the same call read 0.32 s a minute later. Deferral, not
+        # suppression — the pending flag survives, so the next probe still reports
+        # if the slowness outlives the load, and a real outage that starts during
+        # one stays pending rather than being dropped.
+        load1, ncpu = (load_fn or machine_load)()
+        if ncpu and load1 >= ncpu:
+            out["deferred"] = (f"load {load1:.1f} on {ncpu} cpu(s): a slow call here "
+                               "says 'busy', not 'broken'; waiting for the next probe")
+            state["pending"] = {sig: pending.get(sig) or now}
             save_state(state, state_path)
             return out
     if pending:
