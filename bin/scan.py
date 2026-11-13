@@ -354,6 +354,31 @@ def main():
             f"now={time.strftime('%F %T', time.localtime(now))} "
             f"state_mtime={time.strftime('%F %T', time.localtime(os.path.getmtime(STATE_PATH))) if os.path.exists(STATE_PATH) else 'missing'}")
     HIGH_KINDS = {"failed_run", "run_error", "approval_pending", "stalled"}
+
+# A run that died on a transport error against a shared endpoint is not the same news
+# as a run that crashed: measured 2026-11-13, failed_run/run_error fired at `high`
+# three times for `Connection refused` to the intranet model host while the same
+# session's next run completed. Reported, not escalated: the ledger keeps the failure,
+# the brief still counts it, and only the wake urgency drops (these retry by themselves).
+TRANSIENT_ERRORS = (
+    "connection refused",
+    "tcp connect error",
+    "error sending request",
+    "connection reset",
+    "timed out",
+    "timeout",
+    "temporarily unavailable",
+    "502",
+    "503",
+    "504",
+)
+
+
+def transient_failure(error) -> bool:
+    """True when a failed run died on the network, not on the code it was running."""
+    text = str(error or "").lower()
+    return bool(text) and any(marker in text for marker in TRANSIENT_ERRORS)
+
     # Sessions the previous scan deferred (deep-check budget). Filled in below,
     # before the per-session loop; emit() needs it to avoid suppressing them.
     deferred_prev_set = {x for x in (state.get("deferred") or [])}
@@ -554,12 +579,15 @@ def main():
                 # (measured: 4 cancelled + 2 completed reported as "累计 4 次").
                 # Derive from the ledger and only count real failures.
                 REAL_FAILURES = ("failed", "error", "aborted")
+                last_error = None
                 if led:
                     failed = sum(1 for r in led if r.get("status") in REAL_FAILURES)
                     last_status = led[-1].get("status")
                     last_run_id = led[-1].get("runId")
+                    last_error = led[-1].get("error")
                 else:
                     failed = int(d.get("failedRuns") or 0)
+                    last_error = None
             except Exception:
                 pass
         entries = tail_entries(cfg, sid, total) if total else []
@@ -577,19 +605,24 @@ def main():
 
         prev_failed = rec.get("failedRuns")
         if failed and (prev_failed is None or failed > int(prev_failed)):
-            emit(rec, base, "failed_run", "high",
+            emit(rec, base, "failed_run", "low" if transient_failure(last_error) else "high",
                  f"出现失败的运行（累计 {failed} 次）",
                  {"failedRuns": failed, "lastRunStatus": last_status}, key_extra=str(failed),
                  stamp=lastMs, fresh=lastMs)
         if last_status in ("failed", "error", "aborted"):
+            # A transport failure against a shared endpoint retries itself; say so in
+            # the record instead of waking the supervisor at `high` (see TRANSIENT_ERRORS).
+            transient = transient_failure(last_error)
             # Keyed by the run id, not the session's last ordinal: with the ordinal,
             # appending any user message re-fired the same failure (the same run was
             # reported 4 times in one morning). One run = one report — `stable=True`
             # is what makes that true, since `lastMs` moves with every later record
             # in the same session (2026-10-20: four reports of one 502 in 11 min).
-            emit(rec, base, "run_error", "high",
-                 f"最近一次运行状态：{last_status}",
-                 {"lastRunStatus": last_status, "runId": last_run_id},
+            emit(rec, base, "run_error", "low" if transient else "high",
+                 ("最近一次运行因连接错误失败（大概率是共享端点重启窗口，可自行重试）"
+                  if transient else f"最近一次运行状态：{last_status}"),
+                 {"lastRunStatus": last_status, "runId": last_run_id,
+                  "transient": transient},
                  key_extra=str(last_run_id or last_ord),
                  stamp=lastMs, fresh=lastMs, stable=True)
         rec["failedRuns"] = failed
