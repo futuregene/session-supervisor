@@ -84,3 +84,27 @@
   或会话名形如 `acceptance: …`，先 `peek` 确认它是 worker，只记录不介入。
   **（根治）**让 `worker_sessions()` 也认 envelope 里的 goal id 或 `FUTURE_GOAL_ROOT`——改扫描器属本设施自身，走 PR。
 
+### B15 「扫描器在跑」和「扫描器在扫」是两件事：只认收尾行与 state 写入
+- **表现**：`logs/scan.log` 每 ~32 秒照旧写两行 `resync scan (gap …)` / `resync detail`，
+  `logs/decide.log` 心跳不断，`state/watchd.pid` 里的进程活着，`session list failed` 计数为 0，
+  `[blind]` 一行都没有——而**一条事件也没扫出来，一次也没被唤醒**，这个状态持续了 17 小时 41 分。
+- **判据（一条命令，不要靠读日志找线索）**：跑一次 `python3 bin/scan.py`，
+  ① stdout 末尾必须有 `sessions=… active=… deep=… events=…` 这一行；
+  ② `state/state.json` 与 `state/health.json` 的 mtime 必须前进。
+  只有 `resync` 两行、mtime 不动 ⇒ 主流程没跑到 `save_json`，扫描器在空转。
+  此时 `resync scan …: only urgent events` 的真实含义是**任何事件都不会产生**，
+  而不是"只报紧急的那几类"——日志文字与实际行为相反时，以行为为准。
+- **为什么既有信号全判"健康"**：`bin/blind.py` 只读 `health.json` 的 `ok` 字段，
+  **从不问它是否新鲜**（`have_health()` 把 `ts` 丢掉），一份冻结的 `ok=true` 永远被判健康。
+  正确的那条断言在 `bin/liveness.py`（`health.json` 超过 180 秒即 `FAIL scanner`）里，
+  **而循环里没人调用它**。单测与 `selfcheck` 也看不见：它们直接调函数，不跑一次 `main()`。
+- **成因（一次真实事故）**：一个"降噪"改动把模块级的常量与 `transient_failure()`
+  **插进了 `main()` 的函数体中间**：`main()` 到 resync 那两行日志就结束，其后约 360 行
+  （`emit()`、逐会话循环、`state["lastScanTs"] = now`、两次 `save_json`、收尾那行日志）
+  落在 `transient_failure()` 的 `return` 之后，成了不可达的死代码。
+  Python 不报错、退出码 0、`selfcheck` 全绿——**只有端点断言能看见它**。
+- **对策**：① 往既有函数里加东西之前先确认落在模块层还是函数体内
+  （`grep -n '^def \|^    def '` 看缩进层级，或对目标函数跑 `ast` 取 `end_lineno`）；
+  ② 改动扫描器后跑**端点断言**而不是只跑单测：收尾行在、`state.json` 的 mtime 前进；
+  ③ 永不把"`logs/scan.log` 有新行"当成"扫描正常"。
+
