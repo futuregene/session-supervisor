@@ -328,6 +328,59 @@ def main() -> int:
     check("list says so when the live task list cannot be read",
           "活任务名单取不到" in out and "cli unavailable" in out, out)
 
+    # 14. The id on the card must be a usable command argument. `inbox.py list` prints the
+    # event id, and that is what the documented loop hands back to `digest` / `reviewed`.
+    # The generic `event_id()` dropped the separator in `tsk_…` and glued the counters on,
+    # so every copy-paste ended in `no task matching` — one task accumulated 27 unreviewed
+    # runs that way, and the failure looked like nobody was doing the review.
+    REAL = {"id": "tsk_6602174f54c14c55b122e520c718fe82", "name": "dev 分支 PR 合并",
+            "enabled": True, "trigger": "every 60m", "sessionRetention": "delete"}
+    mod.future = lambda _cfg, _args, timeout=30: (
+        0, _json.dumps({"task": dict(REAL, prompt="x" * 100, promptVersion=3)}), "")
+    st9 = {}
+    led9 = [run("g1")]
+    mod.fetch_tasks = lambda _cfg: ([REAL], "")
+    mod.fetch_runs = lambda _cfg, _tid, limit=20: list(reversed(led9))
+    mod.collect({"task_review_every_runs": 1, "task_poll_seconds": 0}, state=st9,
+                now_ms=70_000_000, force=True, fetch=True)  # baseline
+    led9.append(run("g2", ver=3))
+    ev9, st9 = mod.collect({"task_review_every_runs": 1, "task_poll_seconds": 0},
+                           state=st9, now_ms=70_000_000 + 3_600_000, force=True, fetch=True)
+    rev9 = [e for e in ev9 if e["kind"] == "task_review"]
+    check("a review event carries the real task id",
+          rev9 and rev9[0]["detail"].get("task_id") == REAL["id"],
+          f"{rev9 and rev9[0]['detail']}")
+    check("the review event id keeps the id readable",
+          rev9 and REAL["id"] in rev9[0]["id"], f"{rev9 and rev9[0]['id']}")
+
+    task9, amb9 = mod.resolve_task([REAL], rev9[0]["id"] if rev9 else "")
+    check("the event id resolves to that task",
+          task9 is not None and task9["id"] == REAL["id"] and amb9 == [],
+          f"{task9} {amb9}")
+    legacy = "evt_task_review_tsk6602174f54c14c55b122e520c718fe8214985"
+    task9b, amb9b = mod.resolve_task([REAL], legacy)
+    check("a legacy event id (separators stripped, counters glued) still resolves",
+          task9b is not None and task9b["id"] == REAL["id"], f"{task9b} {amb9b}")
+    task9c, _ = mod.resolve_task([REAL], REAL["id"])
+    check("the plain task id still resolves", task9c is not None and task9c["id"] == REAL["id"],
+          f"{task9c}")
+
+    st9["tasks"][REAL["id"]]["runsSinceReview"] = 3
+    said9: list[str] = []
+    rc9 = mod.cmd_reviewed([rev9[0]["id"]] if rev9 else ["nothing"],
+                           {"task_review_every_runs": 1}, state=st9, tasks=[REAL],
+                           say=said9.append)
+    check("`reviewed <event id>` resets the counter",
+          rc9 == 0 and st9["tasks"][REAL["id"]]["runsSinceReview"] == 0,
+          f"rc={rc9} {said9[-1:]}")
+
+    # ... and a prefix that matches two tasks is still refused, never guessed
+    twins = [{"id": "tsk_aaaa1111aaaa1111aaaa1111aaaa1111", "name": "甲"},
+             {"id": "tsk_aaaa2222aaaa2222aaaa2222aaaa2222", "name": "乙"}]
+    got9, amb9c = mod.resolve_task(twins, "tsk_aaaa")
+    check("a normalized prefix that matches two tasks is ambiguous",
+          got9 is None and len(amb9c) == 2, f"{got9} {amb9c}")
+
     print(f"\n{'ALL OK' if not FAILS else str(len(FAILS)) + ' FAILED'}")
     return 0 if not FAILS else 1
 

@@ -107,4 +107,17 @@
   （`grep -n '^def \|^    def '` 看缩进层级，或对目标函数跑 `ast` 取 `end_lineno`）；
   ② 改动扫描器后跑**端点断言**而不是只跑单测：收尾行在、`state.json` 的 mtime 前进；
   ③ 永不把"`logs/scan.log` 有新行"当成"扫描正常"。
+- **三道闸（都由 `python3 bin/selfcheck.py` 实际跑）**：
+  1. **结构**：`bin/selftest_scan_structure.py` 用 `ast` 取 `main()` 的 `FunctionDef`，断言
+     体内有 `state["lastScanTs"] = now`、末句是 `return 0`、语句数不低于真实值的 90%，
+     且体内有 `sessions=` 那条收尾日志；它还会**把当年那一行插回去**（第 0 列的 `def`），
+     证明同一套断言会变红——只贴绿色的断言等于没断言。
+  2. **端点**：`bin/watchd.sh` 每轮先把 `scan.py` 的输出收进临时文件再原样追加进日志，
+     然后若**退出码非 0** 或**这一轮没有 `[scan] sessions=` 收尾行**，就写一行
+     `[watchd] scan produced no summary (exit=N)`。于是"每轮只有两行"这件事在日志里自己说得出来。
+  3. **判据**：`bin/blind.py` 加一条——`now - state.lastScanTs > 10 × scan_interval_seconds`
+     且 `state/watchd.pid` 的进程仍活着时，报**扫描在跑但没有推进（lastScanTs 停在 X，已 N 分钟）**。
+     默认 30 秒间隔下五分钟就会开口，而不是等到十八小时后有人来问。
+     它的去重签名按 `lastScanTs` 定、**不按措辞定**——话术里带着分钟数，每轮都不一样，
+     按措辞去重就永远到不了"说一次"的阈值。
 

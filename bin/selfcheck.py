@@ -114,6 +114,35 @@ def check_scan_selftest() -> tuple[bool, str]:
     return p.returncode == 0, (tail[-1] if tail else f"exit {p.returncode}")
 
 
+def check_scan_structure_selftest() -> tuple[bool, str]:
+    """`scan.py`'s `main()` must still be one function, and watchd must notice when it isn't.
+
+    Nothing in the behaviour tests can see the failure that cost 18.4 hours of blindness:
+    a column-0 `def` pasted inside `main()` ends it *legally*, the rest of the function
+    becomes dead code, and the process still exits 0 with two plausible log lines. Only a
+    structural assertion sees it (`selftest_scan_structure.py`, which also re-introduces
+    the break to prove it turns red), plus an endpoint assertion in `bin/watchd.sh` on the
+    round's closing `[scan] sessions=` line.
+    """
+    p = run([sys.executable, os.path.join(ROOT, "bin", "selftest_scan_structure.py")])
+    tail = (p.stdout or "").strip().splitlines()
+    return p.returncode == 0, (tail[-1] if tail else f"exit {p.returncode}")
+
+
+def check_blind_selftest() -> tuple[bool, str]:
+    """The third silence: the loop is up, `health.json` says ok, and nothing advances.
+
+    `state/watchd.pid` proves the watcher exists and `health.json`'s `ok` is frozen at the
+    last round that finished, so both said "healthy" throughout the 18.4-hour episode
+    (`docs/gotcha-scan.md` B15). `state/state.json: lastScanTs` is the only evidence a
+    round completed; `selftest_blind.py` pins that a frozen one is reported once, with a
+    stable signature, and that a fresh one — or a dead watcher — is not this check's news.
+    """
+    p = run([sys.executable, os.path.join(ROOT, "bin", "selftest_blind.py")])
+    tail = (p.stdout or "").strip().splitlines()
+    return p.returncode == 0, (tail[-1] if tail else f"exit {p.returncode}")
+
+
 def check_decide_selftest() -> tuple[bool, str]:
     p = run([sys.executable, os.path.join(ROOT, "bin", "selftest_decide.py")])
     tail = (p.stdout or "").strip().splitlines()
@@ -781,6 +810,8 @@ CHECKS = [
     ("send guard invocation", check_send_guard_invocation),
     ("relay format", check_relay_format),
     ("scan selftest", check_scan_selftest),
+    ("scan structure selftest", check_scan_structure_selftest),
+    ("blind stall selftest", check_blind_selftest),
     ("decide selftest", check_decide_selftest),
     ("active-user quiet wiring", check_active_user_quiet),
     ("inbox fold selftest", check_inbox_selftest),

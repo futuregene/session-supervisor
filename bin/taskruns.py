@@ -175,6 +175,24 @@ def event_id(kind, key):
     return f"evt_{kind}_{re.sub(r'[^A-Za-z0-9]+', '', str(key))[:40]}"
 
 
+TASK_REVIEW_PREFIX = "evt_task_review_"
+
+
+def task_review_event_id(task_id, runs_since, now_ms):
+    """A `task_review` id that is *also* a usable task reference.
+
+    `event_id()` removes every non-alphanumeric character, so `tsk_…` arrived as
+    `tsk…` and the run/hour counters were glued straight onto the id. The id printed by
+    `inbox.py list` is the handle a reader copies, so the documented loop
+    (`digest <id>` / `reviewed <id>`) failed 100% of the time with `no task matching` —
+    one task's 27 unreviewed runs were not a discipline problem but a broken command
+    (2026-11). Keep the separators, keep the counters there for uniqueness; both are
+    undone by `normalize_ref()`.
+    """
+    safe = re.sub(r"[^0-9A-Za-z_]", "", str(task_id))
+    return f"{TASK_REVIEW_PREFIX}{safe}_{int(runs_since)}_{int(now_ms // 3600_000)}"
+
+
 def collect(cfg=None, state=None, now_ms=None, force=False, fetch=True):
     """Poll the watched tasks; return (events, state). Pure unless `fetch` is False.
 
@@ -300,12 +318,14 @@ def collect(cfg=None, state=None, now_ms=None, force=False, fetch=True):
             except Exception as e:  # noqa: BLE001 — never block the event on this
                 print(f"taskruns: digest for {tid} failed: {e}", file=sys.stderr)
             events.append({
-                "id": event_id("task_review", f"{tid}_{runs_since}_{int(now_ms // 3600_000)}"),
+                "id": task_review_event_id(tid, runs_since, now_ms),
                 "kind": "task_review", "priority": "medium",
                 "sessionId": "", "sessionName": (t.get("name") or "")[:80],
                 "summary": f"定时任务『{(t.get('name') or '')[:24]}』{why_review}"
                            + (f"（其中 {fails} 次失败）" if fails else ""),
-                "detail": {"taskId": tid, "taskName": t.get("name"),
+                # `task_id` is the documented key; `taskId` stays as an alias because
+                # `list`/older readers spell it that way.
+                "detail": {"task_id": tid, "taskId": tid, "taskName": t.get("name"),
                            "runsSinceReview": runs_since, "failedRuns": fails,
                            "trigger": t.get("trigger"), "dueReason": why_review,
                            "digest": digest_path},
@@ -352,6 +372,31 @@ def cmd_reviewed(rest, cfg, state=None, tasks=None, why="", now_ms=None, say=pri
     return 0
 
 
+def _ref_key(text):
+    """A task reference compared the way prose repeats it: no separators, any case."""
+    return re.sub(r"[^0-9a-z]", "", (text or "").lower())
+
+
+def normalize_ref(ref):
+    """The comparable core of whatever a reader copied: id, event id, or legacy event id.
+
+    Three shapes have to resolve, and the last one is what a card actually shows:
+
+      `tsk_6602…fe82`                            — the real id (`list` prints this)
+      `evt_task_review_tsk_6602…fe82_6_498123`   — an event id, separators kept
+      `evt_task_review_tsk6602…fe8214985`        — a legacy event id, where `event_id()`
+                                                   stripped every separator and glued
+                                                   the run/hour counters onto the id
+    """
+    s = (ref or "").strip()
+    if s.startswith(TASK_REVIEW_PREFIX):
+        s = s[len(TASK_REVIEW_PREFIX):]
+        # The `_<runs>_<hour>` counters only ever follow the event-id prefix; a bare
+        # `tsk_…` id must not have its own tail mistaken for one.
+        s = re.sub(r"(_\d+)+$", "", s)
+    return _ref_key(s)
+
+
 def resolve_task(tasks, ref):
     """Find the task a `digest`/`reviewed` argument names.
 
@@ -360,6 +405,10 @@ def resolve_task(tasks, ref):
     truncated, so the copy never matched and the command answered "no task matching"
     while the real task kept its counter. Ambiguity is reported, never guessed:
     resolving to the wrong task would reset the wrong counter, which is silent.
+
+    The card and `inbox.py list` hand out an **event** id, not a task id (see
+    `task_review_event_id` and `normalize_ref`), so a normalized match is tried last —
+    after every literal reading, and still only when it is unique.
     """
     ref = (ref or "").strip()
     if not ref:
@@ -372,6 +421,27 @@ def resolve_task(tasks, ref):
         return prefixed[0], []
     if len(prefixed) > 1:
         return None, [t.get("id") for t in prefixed]
+
+    key = normalize_ref(ref)
+    if not key:
+        return None, []
+    keys = [(_ref_key(t.get("id")), t) for t in tasks if t.get("id")]
+    # 1. the reference names the id, or a prefix of it, once the separators are gone
+    ahead = [t for k, t in keys if k.startswith(key)]
+    if len(ahead) == 1:
+        return ahead[0], []
+    if len(ahead) > 1:
+        return None, [t.get("id") for t in ahead]
+    # 2. a legacy event id glued `<id><runs><hour>` together, so here the *id* is the
+    #    prefix and the reference is the longer string. The glued tail is digits only
+    #    (`…fe82` + `414985`) — that is what keeps a *typo'd* id (`tsk_demoXXXX`) from
+    #    resolving to a real task and reporting a false "counter reset".
+    behind = [(t, key[len(k):]) for k, t in keys if key.startswith(k)]
+    behind = [(t, extra) for t, extra in behind if extra.isdigit() and len(extra) <= 12]
+    if len(behind) == 1:
+        return behind[0][0], []
+    if len(behind) > 1:
+        return None, [t.get("id") for t, _ in behind]
     return None, []
 
 

@@ -35,16 +35,22 @@
 ```bash
 python3 bin/taskruns.py list                 # 每个任务：未复盘轮数 / 连续失败 / 是否待复盘
 python3 bin/taskruns.py collect --force      # 立刻轮询一次（默认 120s 节流，scan.py 每次调用）
-python3 bin/taskruns.py digest <任务id|名称>  # 写一份复盘摘录，打印路径
-python3 bin/taskruns.py reviewed <任务id>     # 关掉这一轮：计数归零、reviewPending 清除
+python3 bin/taskruns.py digest <任务id|事件id|名称>  # 写一份复盘摘录，打印路径
+python3 bin/taskruns.py reviewed <任务id|事件id|名称>  # 关掉这一轮：计数归零、reviewPending 清除
 ```
 
 `reviewed` **只认真实的任务 id 或名称**，找不到就报错并列出已知任务（退出码 1，不写任何状态）。
 它以前会把参数原样当成 id 落一条记录：传错一个 id 时屏幕照样打印 "counter reset"，
 真任务的计数却还停在 6 轮、一小时后再次要求复盘。记账命令对"没找到的目标"报成功，
 比拒绝更贵——拒绝只花一次重试，假成功要付一整轮复盘。
-（事件 id `evt_task_review_tsk<32位>` 里的 `tsk<32位>` 不是任务 id，别把它的尾巴当参数：
-任务 id 形如 `tsk_<32 位>`，中间有下划线。）
+
+**事件 id 本身就是可用参数**（曾经不是）：`inbox.py list` 与唤醒卡给出的都是事件 id
+（`evt_task_review_tsk_<32位>_<轮数>_<小时>`），`digest` / `reviewed` 先按原文精确匹配，
+再剥掉事件前缀、下划线与尾部计数后按前缀唯一匹配，所以**照抄卡片上的 id 就能用**；
+事件 `detail.task_id` 里也带着真 id。旧事件（`evt_task_review_tsk<32位><计数>`，分隔符被剥掉、
+计数粘在 id 尾巴上）仍然解析得了。前缀不唯一时报歧义而不是猜。
+（在修好之前，按文档从卡片抄 id 永远得到 `no task matching`，有一个任务因此积累了
+27 轮未复盘——不是因为没人复盘，而是因为复盘命令按文档就一定失败。）
 `list` 会标出**已删除但台账还在**的任务（`已删除（台账保留）`；读不到活任务名单时打印原因，而不是假装都在）。`list` 打印**完整** id，且 `digest` / `reviewed` 接受**唯一前缀**；前缀不唯一时报歧义而不是挑一个。
 以前 `list` 把 id 截到 20 字符，照抄去 `digest` / `reviewed` 得到的是 `no task matching`，
 而真任务的计数照旧停在原地——记账命令对"没找到的目标"报错还算好的，更贵的是它看起来像 id 抄错了。

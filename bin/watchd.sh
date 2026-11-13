@@ -90,8 +90,27 @@ fi
 echo "$SELF_PID" > "$WATCH/state/watchd.pid"
 echo "$(date '+%F %T') [watchd] start pid=$SELF_PID interval=${INTERVAL}s" >> "$WATCH/logs/watchd.log"
 
+# 每轮扫描的端点断言。扫描器"退出码 0 但没跑到收尾"是这份日志自己看不出来的
+# 失败：2026-11 的一次合法函数截断让每轮只写两行 `resync …` 就退出，`logs/scan.log`
+# 看起来仍像在正常巡检，18.4 小时里没有一条事件、一次唤醒（docs/gotcha-scan.md B15）。
+# 所以把这一轮的输出先收进临时文件：照旧原样追加进 scan.log（行为不变），再看
+# 「退出码非 0」或「没有 `[scan] sessions=` 收尾行」，明写一行。
+SCAN_OUT="$(mktemp "${TMPDIR:-/tmp}/scan-round.XXXXXX" 2>/dev/null || true)"
+[ -n "${SCAN_OUT:-}" ] || SCAN_OUT="$WATCH/state/scan-round.out"
+trap 'rm -f "$SCAN_OUT"' EXIT
+# SIGTERM keeps meaning "stop": a bare `trap … TERM` would swallow it and the loop
+# would carry on (the daemon is stopped by hand and by liveness tooling).
+trap 'rm -f "$SCAN_OUT"; exit 143' INT TERM
+
 while true; do
-  "$PY" "$WATCH/bin/scan.py"          >> "$WATCH/logs/scan.log"   2>&1
+  : > "$SCAN_OUT"
+  "$PY" "$WATCH/bin/scan.py" > "$SCAN_OUT" 2>&1
+  SCAN_RC=$?
+  cat "$SCAN_OUT" >> "$WATCH/logs/scan.log"
+  if [ "$SCAN_RC" -ne 0 ] || ! grep -qF '[scan] sessions=' "$SCAN_OUT"; then
+    echo "$(date '+%F %T') [watchd] scan produced no summary (exit=$SCAN_RC)" \
+      >> "$WATCH/logs/scan.log"
+  fi
   "$PY" "$WATCH/bin/blind.py"         >> "$WATCH/logs/scan.log"   2>&1
   "$PY" "$WATCH/bin/approvals.py" auto >> "$WATCH/logs/approvals.log" 2>&1
   "$PY" "$WATCH/bin/notice.py" _trim     >> "$WATCH/logs/scan.log"   2>&1
