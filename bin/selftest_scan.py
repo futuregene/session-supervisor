@@ -236,8 +236,86 @@ def main():
             bad += 1
         print(f"  {'ok      ' if got == want else 'MISMATCH'} excluded={got} want={want} :: {name}")
 
-    print(f"cases={len(CASES) + len(PEAK_CASES) + len(KEY_CASES) + len(CWD_CASES)} mismatches={bad}")
+    bad += check_main_tail_reachable()
+
+    print(f"cases={len(CASES) + len(PEAK_CASES) + len(KEY_CASES) + len(CWD_CASES) + 4} mismatches={bad}")
     return 1 if bad else 0
+
+
+def check_main_tail_reachable() -> int:
+    """Geometry: `main()`'s work must be *in* main, not after an early `return`.
+
+    Why this exists: on 2026-11-13 a module-level helper (`TRANSIENT_ERRORS` +
+    `transient_failure()`) was pasted *into the middle of* `main()`'s body. Python
+    raised nothing, `main()` returned right after its resync log, and the whole
+    tail — `emit()`, the per-session loop, `state["lastScanTs"] = now`, both
+    `save_json` calls, the closing `sessions=… events=…` line — became unreachable
+    dead code. The scanner kept exiting 0 and logging, so every existing signal
+    stayed green for 17h41m: py_compile, the guard selftest and CI all passed
+    because nothing was syntactically wrong, only unreachable.
+
+    So assert the shape, not the behaviour of one run: module-level helpers stay
+    module-level, and `main`'s own body still contains the state write. Move the
+    helper back inside `main()` and this goes red.
+    """
+    import ast
+
+    src = open(os.path.join(HERE, "scan.py"), encoding="utf-8").read()
+    tree = ast.parse(src)
+    bad = 0
+
+    top = {n.name for n in tree.body if isinstance(n, ast.FunctionDef)}
+    for name in ("transient_failure", "main"):
+        ok = name in top
+        bad += not ok
+        print(f"  {'ok      ' if ok else 'MISMATCH'} module-level def {name}() :: {ok}")
+    named = {n.targets[0].id for n in tree.body
+             if isinstance(n, ast.Assign) and isinstance(n.targets[0], ast.Name)}
+    ok = "TRANSIENT_ERRORS" in named
+    bad += not ok
+    print(f"  {'ok      ' if ok else 'MISMATCH'} module-level TRANSIENT_ERRORS :: {ok}")
+
+    main_fn = next((n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "main"), None)
+    # Walk only statements that belong to main itself: a nested def's body does not
+    # count, which is exactly the shape that broke (the dedent to column 0 closed
+    # main() right after its resync log and swallowed the whole tail as that helper's
+    # body, so `main` kept returning 0 while doing nothing).
+    writes, nested_defs, called = [], [], set()
+
+    def collect(node):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            nested_defs.append(node.name)
+            return
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            called.add(node.func.id)
+            if node.func.id == "save_json":
+                writes.append(node.lineno)
+        for child in ast.iter_child_nodes(node):
+            collect(child)
+
+    if main_fn:
+        for st in main_fn.body:
+            collect(st)
+    for label, ok in (
+        ("main() still calls emit() — the per-session reporter", "emit" in called),
+        ("main() still calls save_json() — the state write", bool(writes)),
+    ):
+        bad += not ok
+        print(f"  {'ok      ' if ok else 'MISMATCH'} {label} (lines {writes[:3]}) :: {ok}")
+
+    ok = "transient_failure" not in nested_defs
+    bad += not ok
+    print(f"  {'ok      ' if ok else 'MISMATCH'} transient_failure is not nested in main() :: {ok}")
+
+    # The helper is a pure predicate. If it suddenly owns hundreds of statements, the
+    # tail moved into it again — which is the 2026-11-13 shape, invisible to every
+    # other check because the file still compiles and still exits 0.
+    tfn = next((n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "transient_failure"), None)
+    nstmts = len(tfn.body) if tfn else 0
+    ok = 0 < nstmts <= 5
+    bad += not ok
+    print(f"  {'ok      ' if ok else 'MISMATCH'} transient_failure() is a small predicate (statements={nstmts}) :: {ok}")
+    return bad
 
 
 if __name__ == "__main__":

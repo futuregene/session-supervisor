@@ -270,6 +270,31 @@ def approvals(cfg, sid):
         return []
 
 
+# A run that died on a transport error against a shared endpoint is not the same news
+# as a run that crashed: measured 2026-11-13, failed_run/run_error fired at `high`
+# three times for `Connection refused` to the intranet model host while the same
+# session's next run completed. Reported, not escalated: the ledger keeps the failure,
+# the brief still counts it, and only the wake urgency drops (these retry by themselves).
+TRANSIENT_ERRORS = (
+    "connection refused",
+    "tcp connect error",
+    "error sending request",
+    "connection reset",
+    "timed out",
+    "timeout",
+    "temporarily unavailable",
+    "502",
+    "503",
+    "504",
+)
+
+
+def transient_failure(error) -> bool:
+    """True when a failed run died on the network, not on the code it was running."""
+    text = str(error or "").lower()
+    return bool(text) and any(marker in text for marker in TRANSIENT_ERRORS)
+
+
 def main():
     cfg = load_json(CFG_PATH, {})
     state = load_json(STATE_PATH, {"sessions": {}})
@@ -354,30 +379,6 @@ def main():
             f"now={time.strftime('%F %T', time.localtime(now))} "
             f"state_mtime={time.strftime('%F %T', time.localtime(os.path.getmtime(STATE_PATH))) if os.path.exists(STATE_PATH) else 'missing'}")
     HIGH_KINDS = {"failed_run", "run_error", "approval_pending", "stalled"}
-
-# A run that died on a transport error against a shared endpoint is not the same news
-# as a run that crashed: measured 2026-11-13, failed_run/run_error fired at `high`
-# three times for `Connection refused` to the intranet model host while the same
-# session's next run completed. Reported, not escalated: the ledger keeps the failure,
-# the brief still counts it, and only the wake urgency drops (these retry by themselves).
-TRANSIENT_ERRORS = (
-    "connection refused",
-    "tcp connect error",
-    "error sending request",
-    "connection reset",
-    "timed out",
-    "timeout",
-    "temporarily unavailable",
-    "502",
-    "503",
-    "504",
-)
-
-
-def transient_failure(error) -> bool:
-    """True when a failed run died on the network, not on the code it was running."""
-    text = str(error or "").lower()
-    return bool(text) and any(marker in text for marker in TRANSIENT_ERRORS)
 
     # Sessions the previous scan deferred (deep-check budget). Filled in below,
     # before the per-session loop; emit() needs it to avoid suppressing them.
