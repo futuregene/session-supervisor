@@ -157,3 +157,11 @@ squash 合并会把标题带进主干（带 `(#N)` 后缀），一眼认得出�
 2. **判定「它没推送」之前先跑完上面两条以上**——
    只查一次缺省 `gh pr list --head` 和 `git branch`，等于用「合并后的清理痕迹」当「没做过」的证据。
 3. 已经发生就**如实记**，不要因为「没有内容损失」就略过——这次错的是方法与一次冤枉人的转达。
+
+4. **当日记录文件只能用追加，不能用 `write` 整文件覆盖**——`journal/YYYY-MM-DD.md` 与
+   `reports/decisions/YYYY-MM-DD.md` 是**一整天多条累积**的文件，一次 `write` 就把前面所有条目删掉，
+   而且它们不在 git 里、磁盘上没有第二份，删了就真没了（发生过一次：把当天的 `reports/decisions/` 文件整文件覆盖，
+   条目只能按 `journal/` 复原；本机经过见 `.future/memory/incidents/`）。做法：正文写 `state/tmp-*.txt`，
+   再 `python3 -c` 以 `encoding='utf-8'` 的 `open(..., 'a')` 追加；要改旧条目用 `edit` 精确替换。
+   另：PowerShell 5.1 把中文当参数传给 `python3` 会乱码（`notice.py add --text 中文` 会 `unrecognized arguments`），
+   中文参数一律走"写文件 + 脚本读文件"。
