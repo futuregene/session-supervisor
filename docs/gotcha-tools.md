@@ -59,6 +59,36 @@
     t=t.get('task',t); assert t['modelId'] and t['thinkingLevel'], 'flag 没落库'; print(t['modelId'], t['thinkingLevel'])"
   ```
 
+### D12b `task list --json` **不返回** `modelId` / `thinkingLevel`，空值 ≠ 没有模型
+
+- **表现**：`future task list --all --json` 的每条都**没有** `modelId`、`thinkingLevel` 这两个键，
+  用 `.get()` 读只会得到 `None`——于是"所有任务都没指定模型"这个结论是**假的**，它只是字段不存在。
+  真实值只在 `future task show <id> --json` 里。要给一批任务改模型/思考档位，必须逐个 `show`（40 行约 0.5 秒），
+  或直接读任务库 `~/.future/tasks/tasks.db` 的 `tasks` 表（**不是** `~/.future/agent/agent.db`，那个库里没有 tasks 表）。
+  读这个库有个坑：`sqlite3 -readonly <该文件>` 会报 `unable to open database file (14)`，同样参数对**副本**却正常，
+  根因没核到（怀疑与应用持有的锁/目录权限有关）；可用的读法是
+  `sqlite3 "file:$HOME/.future/tasks/tasks.db?immutable=1" "select ..."` 或 Python 的
+  `sqlite3.connect(..., uri=True)` + `?mode=ro`。**别用 `immutable=1` 去写**——它会让 SQLite 无视锁。
+- **另一半**：`show` 里 `modelId` 为**空串**的任务并不是"没有模型"，而是**运行期吃 `settings.json` 的
+  `defaultModel`**（读 `~/.future/agent/settings.json`）。所以"哪些任务在用 deepseek"这个问题，
+  答案是 `modelId` 含 `deepseek` **加上** `modelId` 为空的那些——漏掉后者会漏掉真正在跑的任务。
+  同理 `thinkingLevel` 为空 ⇒ 不发思考参数（预算 0），不是"默认档"。
+- **对策**：筛"用了某模型的任务"时，先用 `show` 取全量，再按
+  `is_ds = ('deepseek' in (m or '').lower()) or (m == '')` 判；改完**逐条 `show` 回读**，
+  并核对 `trigger` / `enabled` / `nextDueAt` 与改动前快照一致（`edit --thinking` 不该动调度）。
+- **别忘夹具**：任务库里有一批"档位/字段本身就是被测对象"的探针（`ZZ-probe-badthinking` → `ultra`、
+  `ZZ-probe-nothink` → 空、`PROBE-*-medium` → `medium`、`PROBE-默认参数` → 两字段全空）。
+  批量改档位时把它们一起改掉，等于把这些校验悄悄废掉。
+- **软删除**：`task remove` 之后 `task show <id>` **仍能读到**，`task list --all` 也会多出一行；
+  所以"删干净了没有"不能只看 `show` 有没有输出，要看 `task list`（默认列表不含已删）。
+  反过来，**`--all` 的行数不是任务数**：本机 40 行里只有 15 个活跃（`deleted_at IS NULL`），
+  剩下 25 行是历史探针与已删任务。"给所有定时任务改设置"这类批量操作，先按 `deleted_at IS NULL` 分清
+  活跃与残留——把已删的行一起改是浪费，而把行数当任务数写进报告会得出错结论。
+  ```sql
+  select count(*) from tasks where deleted_at is null;              -- 活跃
+  select count(*) from tasks where deleted_at is null and enabled=1; -- 真会跑
+  ```
+
 ### D16 `git checkout -- <file>` 会**丢掉整个文件**的未提交改动
 - **场景**：为验证一条探针"能不能被证伪"而临时改坏常量，想改回去时用了 `git checkout -- <file>`——
   那一轮对它的**全部**改动一起没了，而自检仍全绿，因为改坏与丢失正好互相抵消，最容易误读成"探针被证伪了"。
