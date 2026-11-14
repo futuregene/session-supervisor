@@ -185,13 +185,34 @@ def looks_like_question(text):
     tail = text.strip()[-400:]
     if not tail:
         return False
-    if not any(m in tail for m in Q_MARKERS):
-        return False
-    # require it to actually end question-like: a marker near the end, or the last
-    # line ends with a question mark
     lines = [ln.strip() for ln in tail.splitlines() if ln.strip()]
-    last = lines[-1] if lines else ""
-    return last.endswith(("?", "？")) or any(m in last for m in Q_MARKERS)
+    if not lines:
+        return False
+    last = lines[-1]
+
+    def ends_question(ln):
+        # A heading, table row or blockquote that happens to end in "？" is structure,
+        # not a question addressed to the user.
+        return ln.endswith(("?", "？")) and not ln.startswith(("#", "|", ">"))
+
+    if any(m in tail for m in Q_MARKERS):
+        if ends_question(last) or any(m in last for m in Q_MARKERS):
+            return True
+    # A bare trailing question mark counts on its own. It used to require one of the
+    # Q_MARKERS as well, which silently dropped questions phrased outside that list
+    # (`7fcecb2a`, 2026-11-15: "要我派 X，还是先看 Y？" carried no marker, so the
+    # supervisor read the stop as "no question" and only found it by opening the text).
+    if ends_question(last):
+        return True
+    # A question immediately followed by one short justification line — the shape
+    # `7fcecb2a` actually ended in ("…还是先看 aggregate throughput？" then one
+    # sentence saying why). Only the last line used to be examined, so this shape was
+    # invisible. Bounded to one short non-structural line so a heading or a table
+    # above the ending cannot turn into a question.
+    if len(lines) >= 2 and ends_question(lines[-2]) and len(last) <= 200 \
+            and not last.startswith(("#", "|", ">")):
+        return True
+    return False
 
 
 def skip_goal_session(sid, name, objectives, supervisor, workers=()):

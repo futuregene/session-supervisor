@@ -315,6 +315,27 @@ def check_main_tail_reachable() -> int:
     ok = 0 < nstmts <= 5
     bad += not ok
     print(f"  {'ok      ' if ok else 'MISMATCH'} transient_failure() is a small predicate (statements={nstmts}) :: {ok}")
+    # --- behavioural: which stop counts as a question to the user ----------------
+    # 2026-11-15 `7fcecb2a` ended with "要我派这个，还是先看 aggregate throughput…？" plus
+    # one line of justification. No Q_MARKERS matched and only the last line was
+    # examined, so `questionLike` came back False — a real question got read as
+    # "nothing to answer" and was caught only by opening the text by hand.
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from scan import looks_like_question
+    question_cases = [
+        ("要我派这个，还是先看 aggregate throughput（batch 1/4/8/32）？\n后者是 GOAL 判性能的口径。", True),
+        ("需要你决定：删还是留？", True),
+        ("结论在 docs/a.md。要不要我补一版？", True),
+        ("跑完了，结果见 reports/x.md。", False),
+        ("## 为什么？\n看下面。", False),
+        ("| 长度？ | 值 |\n|---|---|\n| 1024 | 0.98 |", False),
+    ]
+    for text, want in question_cases:
+        got = looks_like_question(text)
+        ok = got == want
+        bad += not ok
+        first = text.splitlines()[0][:44]
+        print(f"  {'ok      ' if ok else 'MISMATCH'} looks_like_question({first!r}) -> {got} (want {want}) :: {ok}")
     return bad
 
 
