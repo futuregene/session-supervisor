@@ -117,6 +117,22 @@ def dedupe_equivalence(rounds=600):
 
 # ------------------------------------------------------------------- 2. crash
 
+
+def _count(db):
+    """How many event rows the child has committed so far (0 before its first)."""
+    if not os.path.exists(db):
+        return 0
+    try:
+        # create=False: the child holds the write lock, and this probe must not
+        # queue behind it for the schema's DDL.
+        conn = store.connect(db, create=False)
+        try:
+            return conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return 0
+
 CRASH_CHILD = r"""
 import sys, time
 sys.path.insert(0, sys.argv[2])
@@ -145,7 +161,7 @@ def crash_safety(rounds=20):
     with open(child, "w", encoding="utf-8") as fh:
         fh.write(CRASH_CHILD)
     rnd = random.Random(424242)
-    stats = {"handled_total": 0, "rows_total": 0, "kills": rounds}
+    stats = {"handled_total": 0, "rows_total": 0, "kills": rounds, "empty": 0}
     bad = []
     for it in range(rounds):
         # A fresh database per round: the point is "a kill leaves a consistent
@@ -153,7 +169,13 @@ def crash_safety(rounds=20):
         db = os.path.join(tmp, "c%d.db" % it)
         proc = subprocess.Popen([sys.executable, child, db, BIN],
                                 stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-        time.sleep(rnd.uniform(0.05, 0.22))
+        # Wait until the child has actually committed something, so "killed before
+        # its first commit" cannot be mistaken for a broken store — on a slow CI
+        # runner a fixed sleep was sometimes shorter than the interpreter's startup.
+        deadline = time.time() + 5.0
+        while time.time() < deadline and not _count(db):
+            time.sleep(0.01)
+        time.sleep(rnd.uniform(0.01, 0.12))
         proc.kill()          # SIGKILL: no cleanup, no rollback hook
         proc.wait()
         err = (proc.stderr.read() or b"").decode("utf-8", "replace")
@@ -174,6 +196,12 @@ def crash_safety(rounds=20):
             # No gaps: the child's ids are consecutive, so the row set is 1..n.
             if ids != list(range(1, len(ids) + 1)):
                 bad.append(f"round {it}: id set has a gap or duplicate ({ids[:6]}…)")
+            if not ids:
+                # The child was killed before its first commit: nothing to say about
+                # consistency, but it must not happen every round or the test would
+                # be green without ever exercising a commit.
+                stats["empty"] += 1
+                continue
             # One transaction per step: handled is 1..n-1 and pending is exactly {n}.
             if handled != list(range(1, len(handled) + 1)):
                 bad.append(f"round {it}: handled is not a prefix ({handled[-3:]})")
@@ -205,10 +233,13 @@ def crash_safety(rounds=20):
             stats["rows_total"] += len(ids)
         finally:
             conn.close()
-    check("crash safety (kill -9 mid-transaction)", not bad,
+    check("crash safety (kill -9 mid-transaction)",
+          not bad and stats["empty"] < max(2, rounds // 5),
           (f"{rounds} kills, 0 violations, rows/round avg "
-           f"{stats['rows_total'] // max(rounds, 1)}, handled avg "
-           f"{stats['handled_total'] // max(rounds, 1)}") if not bad else "; ".join(bad[:4]))
+           f"{stats['rows_total'] // max(rounds - stats['empty'], 1)}, handled avg "
+           f"{stats['handled_total'] // max(rounds - stats['empty'], 1)}"
+           + (f", {stats['empty']} round(s) died before their first commit"
+              if stats["empty"] else "")) if not bad else "; ".join(bad[:4]))
     return stats
 
 
@@ -443,6 +474,44 @@ def mirror_actions_export_back():
           ", ".join(problems) if problems else f"{wrote['changed']} sessions written")
 
 
+def consistency_is_one_sided():
+    """The consistency verdict must not fire on the write-order window.
+
+    Every module writes the database first and the file second, so "the store has a
+    row the files do not" is normal for a millisecond and "the files have a row the
+    store does not" is a defect. A check that reported both would go red at random
+    in production; the first person to see it would weaken it, and then it would
+    catch nothing. So this pins both directions, deterministically.
+    """
+    tmp = tempfile.mkdtemp(prefix="onesided-")
+    root = os.path.join(tmp, "root")
+    db = os.path.join(tmp, "live.db")
+    store._fixture(root)
+    conn = store.connect(db)
+    store.import_from_files(conn, root)
+    conn.close()
+
+    # (a) the store is ahead: a wake row exists in the database only.
+    conn = store.connect(db)
+    store.append_wake(conn, {"ts": 1792200000.0, "reason": "events", "pending": 1,
+                             "highMedium": 1})
+    conn.close()
+    diff = store.consistency_diff(root, db)
+    caught = {k: v for k, v in diff.items() if v.get("missing")}
+    check("a store that is ahead of the files is not a defect",
+          not caught and diff["wakes"]["extra"] == 1,
+          f"missing={caught} extra_wakes={diff['wakes']['extra']}")
+
+    # (b) the files are ahead: a wake row reached the file and not the store.
+    with open(os.path.join(root, "state", "wakes.jsonl"), "a", encoding="utf-8") as fh:
+        fh.write(json.dumps({"ts": 1792200100.0, "reason": "heartbeat", "pending": 0,
+                             "highMedium": 0}) + "\n")
+    diff = store.consistency_diff(root, db)
+    caught = {k: v for k, v in diff.items() if v.get("missing")}
+    check("a write that reached the file and not the store IS a defect",
+          caught.get("wakes", {}).get("missing") == 1, f"missing={caught}")
+
+
 def main(argv):
     quick = "--quick" in argv
     t0 = time.time()
@@ -456,6 +525,8 @@ def main(argv):
     write_amplification()
     print("== 5. per-module mirror round-trip")
     mirror_actions_export_back()
+    print("== 6. the consistency verdict is one-sided")
+    consistency_is_one_sided()
     print("== fixture round-trip (bin/store.py --selftest)")
     if store.selftest() != 0:
         FAILURES.append("fixture round-trip")

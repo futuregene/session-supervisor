@@ -537,6 +537,48 @@ def _jsonl_equal(a, b):
     return _read_jsonl(a) == _read_jsonl(b)
 
 
+def snapshot_files(root, dest):
+    """Copy the legacy files, so the comparison reads the files *before* the database.
+
+    The write order is "database first, file second", so this order is the one that
+    makes the asymmetric verdict sound: a row already present in our file snapshot
+    was written to the database before that file write, and the export happens after
+    both, so the database must contain it. Reading the file after the export instead
+    would manufacture a false "lost write" whenever a scan landed a poll in between —
+    measured on the live deployment: one `taskruns.lastPollMs` was reported missing
+    during a poll and the same check was clean a second later.
+    """
+    for rel in LEGACY.values():
+        src = os.path.join(root, rel)
+        if not os.path.exists(src):
+            continue
+        dst = os.path.join(dest, rel)
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        shutil.copy2(src, dst)
+
+
+def consistency_diff(root, db):
+    """What the live files and the live database disagree about, read in the safe order.
+
+    Returns `diff_trees`' structure, or None when there is no database yet.
+    """
+    if not os.path.exists(db):
+        return None
+    files = tempfile.mkdtemp(prefix="store-files-")
+    out = tempfile.mkdtemp(prefix="store-db-")
+    try:
+        snapshot_files(root, files)          # files first (see snapshot_files)
+        conn = connect(db)
+        try:
+            export_to_files(conn, out)
+        finally:
+            conn.close()
+        return diff_trees(files, out)
+    finally:
+        shutil.rmtree(files, ignore_errors=True)
+        shutil.rmtree(out, ignore_errors=True)
+
+
 def compare_trees(left_root, right_root):
     """Every legacy file in two trees, compared semantically. Returns problems."""
     lp, rp = paths(left_root), paths(right_root)
@@ -1275,16 +1317,7 @@ def main(argv):
             print(f"no database at {db}: nothing to compare (this is not the deployment "
                   f"checkout, or step 1 has not run yet)")
             return 0
-        conn = connect(db)
-        tmp = tempfile.mkdtemp(prefix="store-consistency-")
-        try:
-            export_to_files(conn, tmp)
-        finally:
-            conn.close()
-        try:
-            diff = diff_trees(root, tmp)
-        finally:
-            shutil.rmtree(tmp, ignore_errors=True)
+        diff = consistency_diff(root, db)
         lost = {k: v for k, v in diff.items() if v.get("missing")}
         ahead = {k: v for k, v in diff.items() if v.get("extra")}
         if lost or (ahead and not args.no_lost):

@@ -810,8 +810,13 @@ def check_store_selftest() -> tuple[bool, str]:
     same failure class as the scanner that kept logging and scanned nothing.
     """
     p = run([sys.executable, os.path.join(ROOT, "bin", "selftest_store.py")])
-    tail = (p.stdout or "").strip().splitlines()
-    return p.returncode == 0, (tail[-1] if tail else f"exit {p.returncode}")
+    lines = (p.stdout or "").strip().splitlines()
+    fails = [line for line in lines if line.startswith("FAIL")]
+    # On a red run, the failing assertion's own message is the useful part — the
+    # summary line only says which section failed.
+    detail = ("; ".join(fails[:3]) if fails
+              else (lines[-1] if lines else f"exit {p.returncode}"))
+    return p.returncode == 0, detail
 
 
 def check_store_consistency() -> tuple[bool, str]:
