@@ -72,6 +72,8 @@ from toolpath import tool_path  # noqa: E402
 
 STATE_PATH = os.path.join(WATCH, "state", "service-probe.json")
 PENDING_PATH = os.path.join(WATCH, "inbox", "pending.jsonl")
+# Mirrored into the SQLite store before the event append (see bin/scan.py).
+import store  # noqa: E402
 
 #: The embedding service the index depends on.
 HEALTH_URL = "http://127.0.0.1:8010/health"
@@ -167,6 +169,9 @@ def save_state(state, path=None):
 
 def append_event(event, path=None):
     path = path or PENDING_PATH
+    # The third producer of inbox events (this probe, next to `scan.py` and
+    # `bin/trigger.py`); mirrored into the store before the file append.
+    store.mirror_at("scan", store.write_events, path, "pending", [event])
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "a", encoding="utf-8") as fh:
         fh.write(json.dumps(event, ensure_ascii=False) + "\n")

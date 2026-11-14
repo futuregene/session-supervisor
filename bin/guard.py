@@ -25,6 +25,10 @@ from toolpath import future_exe, tool_path, config_path  # noqa: E402
 WATCH = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CFG_PATH = config_path()
 SENT = os.path.join(WATCH, "state", "sent.jsonl")
+# Mirrored into the SQLite store before the send is logged (see bin/scan.py). The
+# rate-limit ledger is what decides whether a message may be sent at all, so the file
+# write stays authoritative and a mirror failure only gets logged.
+import store  # noqa: E402
 
 DEFAULTS = {"max_messages_per_session_4h": 4,
             "max_messages_per_session_day": 12,
@@ -152,9 +156,11 @@ def main(argv):
     if cmd == "record":
         sid = argv[1]
         note = argv[2] if len(argv) > 2 else ""
+        row = {"ts": now, "sessionId": sid, "note": note}
+        store.mirror_at("sent", store.append_sent, SENT, "sent", row)
         os.makedirs(os.path.dirname(SENT), exist_ok=True)
         with open(SENT, "a", encoding="utf-8") as fh:
-            fh.write(json.dumps({"ts": now, "sessionId": sid, "note": note}, ensure_ascii=False) + "\n")
+            fh.write(json.dumps(row, ensure_ascii=False) + "\n")
         print("recorded")
         return 0
 

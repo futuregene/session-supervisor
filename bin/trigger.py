@@ -67,6 +67,11 @@ PENDING = os.path.join(WATCH, "inbox", "pending.jsonl")
 SEEN = os.path.join(WATCH, "state", "external-seen.jsonl")
 BODY_DIR = os.path.join(WATCH, "state", "external")
 
+# Mirrored into the SQLite store before the pending append (see bin/scan.py). This is
+# the outside world's entry point into the inbox, and the store has to learn about
+# those events the same way it learns about the scanner's.
+import store  # noqa: E402
+
 TRUSTS = ("system", "self", "external-known", "external-unknown")
 ACTIONS = ("observe", "triage", "act")
 PRIORITIES = ("high", "medium", "low")
@@ -272,6 +277,7 @@ def ingest(obj, at_ms=None, pending_path=None, seen_path=None, body_dir=None):
         return event, False
     write_body(digest, payload, body_dir)
     pending = pending_path or PENDING
+    store.mirror_at("scan", store.write_events, pending, "pending", [event])
     os.makedirs(os.path.dirname(pending), exist_ok=True)
     with open(pending, "a", encoding="utf-8") as fh:
         fh.write(json.dumps(event, ensure_ascii=False) + "\n")

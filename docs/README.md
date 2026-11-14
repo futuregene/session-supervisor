@@ -38,6 +38,7 @@
 | [gotcha-records.md](gotcha-records.md) | 提交与记录之前 |
 | [git-flow.md](git-flow.md) | **要在本仓改文件/开 PR/收尾同步**（必读） |
 | [privacy-and-state.md](privacy-and-state.md) | 决定某文件该不该提交、或处理隐私/运行态 |
+| [state-store.md](state-store.md) | 怀疑 `state/` 的文件与 `state/supervisor.db` 不一致、要调 `store-mode.json` 开关、或要改扫描器的写入路径 |
 | [external-events.md](external-events.md) | 要让外部应用往收件箱放事件、或改 `trigger.py` 的字段之前 |
 | [proposals/external-event-source.md](proposals/external-event-source.md) | 要决定接不接外部事件源、或实现 `trigger.py` 之前 |
 

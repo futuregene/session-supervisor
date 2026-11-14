@@ -26,6 +26,12 @@ WATCH = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PENDING = os.path.join(WATCH, "inbox", "pending.jsonl")
 HANDLED = os.path.join(WATCH, "inbox", "handled.jsonl")
 
+# Mirrored into the SQLite store (bin/store.py) before each file write; see the long
+# note in bin/scan.py. `mirror_inbox` only fires when both paths are the live pair, so
+# a selftest with its own temp inbox is unaffected.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import store  # noqa: E402
+
 
 def read_lines(path):
     out = []
@@ -135,6 +141,7 @@ def apply_fold(pending_path=PENDING, handled_path=HANDLED, kinds=FOLD_KINDS,
     rows = read_lines(pending_path) if rows is None else list(rows)
     keep, folded = fold_superseded(rows, kinds=kinds, now_ms=now_ms)
     if folded and not dry:
+        store.mirror_inbox(store.mark_handled, folded, pending_path, handled_path)
         write_lines(pending_path, keep)
         os.makedirs(os.path.dirname(handled_path), exist_ok=True)
         with open(handled_path, "a", encoding="utf-8") as fh:
@@ -174,6 +181,8 @@ def ack(ids, pending_path=PENDING, handled_path=HANDLED, all_rows=False, now_ms=
             moved.append(rec)
         else:
             kept.append(e)
+    if moved:
+        store.mirror_inbox(store.mark_handled, moved, pending_path, handled_path)
     write_lines(pending_path, kept)
     if moved:
         os.makedirs(os.path.dirname(handled_path), exist_ok=True)

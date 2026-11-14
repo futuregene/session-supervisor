@@ -41,6 +41,10 @@ EXCLUDE = os.path.join(WATCH, "state", "approval-exclude.jsonl")
 # approvals: `{session: {"updatedAtMs": n, "checkedAt": epoch}}`. Runtime state
 # (it names this machine's sessions), so it lives under state/ and not in git.
 CACHE = os.path.join(WATCH, "state", "approval-cache.json")
+# Mirrored into the SQLite store before the file write (see the note in bin/scan.py).
+# A mirror failure is logged and swallowed: approval decisions are the one thing in
+# this repo that must never be lost, and the file write stays the authoritative one.
+import store  # noqa: E402
 
 
 def kept_away(now=None):
@@ -129,6 +133,7 @@ def load_cache():
 def save_cache(cache):
     """Write atomically: a half-written cache must not survive a crash."""
     try:
+        store.mirror_at("approvals", store.write_approval_cache, CACHE, "approval_cache", cache)
         os.makedirs(os.path.dirname(CACHE), exist_ok=True)
         tmp = CACHE + ".tmp"
         with open(tmp, "w", encoding="utf-8") as fh:
@@ -331,6 +336,8 @@ def main(argv):
                     fh.write(f"\n- {rec['at']} 会话 `{s['id']}`（{rec['sessionName']}）的权限请求 "
                              f"`{rid}`（工具 {tool}）命中拒绝清单 `{bounce.group(0)}`：{blob[:300]}\n")
                 os.makedirs(os.path.dirname(LEDGER), exist_ok=True)
+                store.mirror_at("approvals", store.append_approval_ledger, LEDGER,
+                                "approval_ledger", rec)
                 with open(LEDGER, "a", encoding="utf-8") as fh:
                     fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
                 print(f"escalated (not approved): {s['id']} {rid} {tool} [{bounce.group(0)}]")
@@ -348,6 +355,8 @@ def main(argv):
                 else:
                     rec["action"] = "failed"
             os.makedirs(os.path.dirname(LEDGER), exist_ok=True)
+            store.mirror_at("approvals", store.append_approval_ledger, LEDGER,
+                            "approval_ledger", rec)
             with open(LEDGER, "a", encoding="utf-8") as fh:
                 fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
             with open(REPORT, "a", encoding="utf-8") as fh:

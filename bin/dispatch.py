@@ -118,6 +118,11 @@ def action_refusal(action, event_id=None):
 
 WATCH = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PATH = os.path.join(WATCH, "state", "dispatch.jsonl")
+# Mirrored into the SQLite store before the file write (see bin/scan.py). The file
+# stays the read path in every one of the three migration steps; a mirror failure
+# is logged and swallowed so a row can never be lost to a database problem.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import store  # noqa: E402
 
 # close_when: the specs this build decides, the ones it deliberately does not, and the limits.
 PR_MERGED = "pr-merged"
@@ -196,6 +201,7 @@ def read(path=None):
 
 def append(row, path=None):
     path = path or PATH
+    store.mirror_at("dispatch", store.append_dispatch, path, "dispatch", row)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "a", encoding="utf-8") as fh:
         fh.write(json.dumps(row, ensure_ascii=False) + "\n")
@@ -414,6 +420,7 @@ def prune(days=14, path=None):
             continue
     if not finished:
         return 0
+    store.mirror_at("dispatch", store.prune_dispatch, path, "dispatch", sorted(finished))
     keep = [row for row in rows if row.get("session") not in finished]
     with open(path, "w", encoding="utf-8") as fh:
         fh.writelines(json.dumps(row, ensure_ascii=False) + "\n" for row in keep)

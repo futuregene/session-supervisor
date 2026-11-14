@@ -35,6 +35,13 @@ import balance_probe  # noqa: E402
 # with `connection refused` and 1313 recordings never entered the index. The probe is
 # silent unless a criterion says degraded, so its normal output costs one line here.
 import service_probe  # noqa: E402
+# Step 2 of the state migration: every write below is *also* mirrored into the SQLite
+# store (bin/store.py), after which the same write happens to the file as before. The
+# mirror is a no-op when its module switch is off, and a mirror failure is logged and
+# swallowed — a database problem must never be what stops a scan from recording state
+# (the failure mode that matters here is not "the DB is wrong", it is "the scan
+# silently did not write anything", see docs/gotcha-scan.md B15).
+import store  # noqa: E402
 
 # Locating `future`/`python3`: discovery, not a hardcoded Homebrew path (see toolpath.py).
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -307,8 +314,10 @@ def main():
     if rc != 0:
         line = err_line(err)
         log(f"session list failed rc={rc}: {line[:200]}")
-        save_json(HEALTH_PATH, {"ts": now, "ok": False, "error": f"session list rc={rc}",
-                                "error_line": line, "stderr": err[:500]})
+        failed = {"ts": now, "ok": False, "error": f"session list rc={rc}",
+                  "error_line": line, "stderr": err[:500]}
+        store.mirror("scan", store.write_health, failed)
+        save_json(HEALTH_PATH, failed)
         return 1
     try:
         all_sessions = json.loads(out).get("sessions", [])
@@ -343,6 +352,7 @@ def main():
     if "--adopt-peak" in sys.argv:
         state["peakSessions"] = len(all_sessions)
         state["peakSessionsTs"] = now
+        store.mirror("scan", store.write_state, state)
         save_json(STATE_PATH, state)
         log(f"adopted peak: peakSessions={len(all_sessions)} (explicit)")
         return 0
@@ -722,11 +732,13 @@ def main():
                 del sessions_state[sid]
 
     if events:
+        store.mirror("scan", store.write_events, events)
         os.makedirs(os.path.dirname(PENDING_PATH), exist_ok=True)
         with open(PENDING_PATH, "a", encoding="utf-8") as fh:
             for ev in events:
                 fh.write(json.dumps(ev, ensure_ascii=False) + "\n")
 
+    store.mirror("scan", store.write_state, state)
     save_json(STATE_PATH, state)
     health = {"ts": now, "ok": True, "baseline": baseline, "resync": resync, "bulk": bulk,
               "sessionsTotal": len(all_sessions),
@@ -734,6 +746,7 @@ def main():
               "events": len(events), "taskEvents": len(task_events)}
     if degraded:
         health["degraded"] = degraded
+    store.mirror("scan", store.write_health, health)
     save_json(HEALTH_PATH, health)
     log(f"sessions={len(all_sessions)} active={len(active)} deep={deep} events={len(events)}"
         + (f" DEGRADED" if degraded else ""))

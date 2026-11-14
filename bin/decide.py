@@ -45,6 +45,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # card (`inbox.fold_superseded` has the measurements and the reasoning). `bin/` is not
 # a package, so it is imported by path — same pattern as scan.py's goal_sessions.
 import inbox as inbox_mod  # noqa: E402
+# Mirrored into the SQLite store before the wake row is appended (see bin/scan.py).
+import store  # noqa: E402
 
 # Locating `future`/`python3`: discovery, not a hardcoded Homebrew path (see toolpath.py).
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -621,9 +623,11 @@ def main():
         return 1
 
     # Only now is the wake real.
+    row = {"ts": now, "reason": reason, "pending": len(pending),
+           "highMedium": len(interesting)}
+    store.mirror_at("decide", store.append_wake, WAKES, "wakes", row)
     with open(WAKES, "a", encoding="utf-8") as fh:
-        fh.write(json.dumps({"ts": now, "reason": reason, "pending": len(pending),
-                             "highMedium": len(interesting)}) + "\n")
+        fh.write(json.dumps(row) + "\n")
     try:
         if reason == "events":
             next_streak = 0 if fresh else stale_streak + 1

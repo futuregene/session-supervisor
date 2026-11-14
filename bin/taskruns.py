@@ -51,6 +51,9 @@ from toolpath import tool_path, config_path  # noqa: E402
 CFG_PATH = config_path()
 STATE_PATH = os.path.join(WATCH, "state", "taskruns.json")
 DIGEST_DIR = os.path.join(WATCH, "state", "task-digests")
+# Mirrored into the SQLite store before the file write (see bin/scan.py). One hook
+# here covers both callers (the 30 s scan and `taskruns.py` itself).
+import store  # noqa: E402
 
 # `completed` is the only success spelling the ledger uses; everything else is worth
 # an event except a user cancellation, which is the user's own doing (the scan does not
@@ -84,6 +87,7 @@ def load_json(path, default):
 
 
 def save_json(path, obj):
+    store.mirror_at("taskruns", store.write_taskruns, path, "taskruns", obj)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as fh:

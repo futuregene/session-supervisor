@@ -800,11 +800,48 @@ def check_docs_are_framework_only() -> tuple[bool, str]:
                             else "AGENTS.md + docs/ carry no dated provenance")
 
 
+def check_store_selftest() -> tuple[bool, str]:
+    """The SQLite store keeps the four properties the migration is trusted on.
+
+    `bin/selftest_store.py` is where they live: dedupe equivalence against the
+    file-based `emitted` window, 20 `kill -9` kills mid-transaction, three concurrent
+    writers with zero `database is locked`, and a measured write per scan that is
+    O(rows changed). A store that looks like it writes but silently does not is the
+    same failure class as the scanner that kept logging and scanned nothing.
+    """
+    p = run([sys.executable, os.path.join(ROOT, "bin", "selftest_store.py")])
+    tail = (p.stdout or "").strip().splitlines()
+    return p.returncode == 0, (tail[-1] if tail else f"exit {p.returncode}")
+
+
+def check_store_consistency() -> tuple[bool, str]:
+    """No write may reach a legacy file without also reaching the database.
+
+    While every module dual-writes (store first, file second) the reverse — the store
+    having a row the file does not — is the normal sub-millisecond window, so only a
+    *lost* write fails here. The comparison runs against the deployment checkout, not
+    this worktree: `state/` is untracked, so a worktree never holds the live files.
+    """
+    out = run(["git", "worktree", "list", "--porcelain"]).stdout
+    roots = [line.split(" ", 1)[1].strip() for line in out.splitlines()
+             if line.startswith("worktree ")]
+    root = roots[0] if roots else ROOT
+    db = os.path.join(root, "state", "supervisor.db")
+    if not os.path.exists(db):
+        return True, f"no live database under {root} (step 1 only on this host)"
+    p = run([sys.executable, os.path.join(ROOT, "bin", "store.py"),
+             "--check-consistency", "--no-lost", "--root", root, "--db", db])
+    tail = (p.stdout or "").strip().splitlines()
+    return p.returncode == 0, (tail[-1] if tail else f"exit {p.returncode}")
+
+
 CHECKS = [
     ("python syntax", check_python_syntax),
     ("imports complete", check_imports_complete),
     ("shell syntax", check_shell_syntax),
     ("json", check_json),
+    ("store selftest", check_store_selftest),
+    ("store consistency", check_store_consistency),
     ("guard selftest", check_guard_selftest),
     ("approvals selftest", check_approvals_selftest),
     ("send guard invocation", check_send_guard_invocation),
