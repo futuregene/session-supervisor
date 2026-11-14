@@ -5,8 +5,8 @@ Why this exists (user, 2026-11-06): the value of a background "dream" pass is no
 adding more memory but *consolidating and forgetting* — the memory layer degrades by
 piling up. Measured on this machine before writing this file:
 
-    * `future-os/FUTURE.md` was 12,027 bytes against a 12,000-byte cap, so the loader
-      truncates it at load time — a silent loss that no reader can see;
+    * `future-os/FUTURE.md` was 12,027 bytes — 261 B short of the loader's 12,288-byte cap (12 KB),
+      not already truncated; but the index grows by appending, and past that line the tail goes silently;
     * of 52 topic files across three workspaces, 28 carried appended corrections
       ("补/更正/已改/不再") and **none** used a strikethrough or a SUPERSEDED marker,
       so a reader going top-down meets the stale claim first;
@@ -58,7 +58,7 @@ LEDGER = os.path.join(STATE, "memlint.jsonl")
 # Caps from the memory convention this facility is written against (30 entries /
 # 100 lines / 12 KB). Kept here so the check and the loader cannot drift apart
 # silently; if the loader's cap changes, this constant changes with it.
-CAP_BYTES, CAP_LINES, CAP_ENTRIES = 12000, 100, 30
+CAP_BYTES, CAP_LINES, CAP_ENTRIES = 12 * 1024, 100, 30  # B = future-os/agent/src/prompt/mod.rs:174-175 (MEMORY_INDEX_MAX_KB = 12)
 STALE_DAYS = 7
 ACTIVE_WINDOW = 24 * 3600
 
@@ -489,6 +489,35 @@ def selftest() -> int:
                 print(f"selftest FAIL: {label}: expected {want}, got {got}")
                 ok = False
         os.remove(os.path.join(mem, "p.md"))
+        # The byte cap is geometry, and the loader's own number is pinned here twice:
+        # `future-os/agent/src/prompt/mod.rs:174-175` sets MEMORY_INDEX_MAX_KB = 12 and
+        # truncates only when the index is *over* MEMORY_INDEX_MAX_KB * 1024 = 12,288 B.
+        # The literal below is deliberately not `CAP_BYTES`: if it were, a wrong module
+        # constant would move the test with it and the drift would stay invisible — which
+        # is exactly how "12,000" survived against a 12,288 B loader and reported a 12,190 B
+        # index (98 B of headroom left, nothing truncated) as `capacity`.
+        # Both sides are asserted, so the pair goes red in either direction: a cap that is
+        # too low fails the "12,288 B is not over the line" half, a cap that is too high
+        # fails the "12,289 B is over it" half.
+        LOADER_CAP = 12 * 1024  # 12,288 B — future-os/agent/src/prompt/mod.rs:174-175
+
+        def index_at(total_bytes: int) -> str:
+            """A well-formed index (30 entries, well under 100 lines) of exactly N bytes."""
+            rows = [f"- [n{i}](.future/memory/full.md) — hook" for i in range(30)]
+            pad = total_bytes - len(("\n".join(rows) + "\n").encode())
+            rows[-1] += "x" * pad
+            text = "\n".join(rows) + "\n"
+            assert len(text.encode()) == total_bytes, (len(text.encode()), total_bytes)
+            return text
+
+        fut = os.path.join(ws, "FUTURE.md")
+        for nbytes, want_capacity in ((LOADER_CAP, False), (LOADER_CAP + 1, True)):
+            open(fut, "w", encoding="utf-8").write(index_at(nbytes))
+            got = "capacity" in {x["kind"] for x in scan([ws])}
+            if got != want_capacity:
+                print(f"selftest FAIL: index of {nbytes} B: expected capacity={want_capacity}, "
+                      f"got {got} (CAP_BYTES={CAP_BYTES}, loader={LOADER_CAP})")
+                ok = False
     print("selftest ok" if ok else "selftest FAILED")
     return 0 if ok else 1
 

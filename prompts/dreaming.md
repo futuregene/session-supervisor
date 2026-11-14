@@ -19,7 +19,7 @@ python3 bin/memlint.py --record --run-id "$RUN"   # 扫 24h 活跃工作区；�
 - **标取代**：`~~旧说法~~ → 新说法（日期）` 或 `SUPERSEDED(日期) by …`；
 - **补验证命令**，或补 `unverified-since <日期>`。
 
-顶到上限（12,000 B / 100 行 / 30 条）时：把最久未复核且属瞬态的条目移到
+顶到上限（12,288 B = 12 KB / 100 行 / 30 条）时：把最久未复核且属瞬态的条目移到
 `.future/memory/archive/<YYYY-MM-DD>/`，`FUTURE.md` 留一行指针。**永远不删除条目。**
 不改 `journal/`、`reports/` 的历史；不碰 `.private/`；**不读写任何凭据文件**。
 
