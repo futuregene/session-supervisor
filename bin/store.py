@@ -34,13 +34,38 @@ database, without having to know this module exists.
   store.py --export-json DIR [--db PATH] [--root DIR]
   store.py stat [--root DIR]
   store.py --check-consistency [--root DIR]         live DB vs live files
+  store.py --retain [--days N] [--dry-run]          trim old event payloads
+  store.py --compact                                reclaim the space afterwards
+  store.py --probe approval_ledger                  is that table actually wired
   store.py --selftest                               fixture round-trip (CI-safe)
   store.py --disable scan,inbox | --enable scan     the per-module switch
   store.py modules                                  what is currently on
+
+Retention and durability are part of the contract, not afterthoughts:
+
+* `events` is the only table that grows without bound (one row per inbox event).
+  Its row carries the scanner's `detail`, which for `awaiting_user` includes up to
+  1500 characters of another session's own text. Rows older than `--retain --days`
+  (default 30) keep their identity — id, kind, priority, session, timestamps, fold
+  link — and a small `detail` summary; the full text stays in `inbox/handled.jsonl`,
+  which is never rewritten. `--export-json` therefore reproduces whichever shape the
+  store holds, and the consistency check accepts a slimmed row as present.
+* `synchronous=NORMAL` under WAL means a commit survives a process crash (`kill -9`,
+  which the selftest does 20 times) without an fsync; an OS crash can lose the last
+  commits, which is exactly what the old `os.replace` of a whole JSON file also
+  allowed. The WAL is folded back and removed when the last connection closes, which
+  for this facility is every process exit (scan, approval cycle, wake turn) — that is
+  why `-wal` is normally absent, not because checkpointing is disabled. The 1000-page
+  autocheckpoint is still in force for a long-lived connection.
+* `PRAGMA optimize` runs at exit (through `atexit`), which is the documented place
+  for it with short-lived connections; `--compact` is the one-off `VACUUM` for a
+  database that already exists, and new databases are created with
+  `auto_vacuum=INCREMENTAL` so later retention runs can be reclaimed cheaply.
 """
 from __future__ import annotations
 
 import argparse
+import atexit
 import json
 import os
 import shutil
@@ -165,6 +190,14 @@ def connect(path=None, create=True):
     conn.execute("PRAGMA busy_timeout=5000")
     conn.execute("PRAGMA synchronous=NORMAL")
     if create:
+        # `auto_vacuum` can only be chosen while the database is empty, so this is
+        # the one moment to do it: without it, the space a retention run frees stays
+        # in the file and only a full `VACUUM` can give it back.
+        try:
+            if conn.execute("PRAGMA page_count").fetchone()[0] <= 1:
+                conn.execute("PRAGMA auto_vacuum=INCREMENTAL")
+        except sqlite3.Error:
+            pass
         ensure_schema(conn)
     return conn
 
@@ -446,6 +479,38 @@ def _int_or_none(value):
         return None
 
 
+#: The fields a slimmed event keeps: who/what/when, and the fold link. `detail` is
+#: the only thing the retention policy drops, because it is the only part that is
+#: large, session-private text rather than an index key.
+SLIM_FIELDS = ("id", "kind", "priority", "sessionId", "detectedAtMs", "emittedAtMs",
+               "handledAtMs", "foldedInto", "foldedReason")
+
+#: The detail fields worth keeping after the text is gone: they say what the event
+#: *was*, which is what a later reader greps for (`task_id`, `runId`, `questionLike`).
+SUMMARY_FIELDS = ("questionLike", "task_id", "taskId", "runId", "action_class",
+                  "thread_key", "failedRuns", "stalledMs", "lastRunStatus", "transient",
+                  "runsSinceReview", "dueReason", "digest", "cwd", "source")
+
+
+def event_summary(detail):
+    """The index-shaped part of an event's detail, without the prose."""
+    detail = detail or {}
+    return {k: detail[k] for k in SUMMARY_FIELDS if k in detail}
+
+
+def slim_event(row):
+    """The retention shape of one event row (see SLIM_FIELDS).
+
+    `_slim` is in the row on purpose: `inbox/handled.jsonl` is an audit log, and a
+    reader who finds a row without `lastAssistantText` must be able to tell "the
+    policy dropped it" from "the producer never wrote it".
+    """
+    out = {k: row[k] for k in SLIM_FIELDS if k in row}
+    out["detail"] = event_summary(row.get("detail"))
+    out["_slim"] = True
+    return out
+
+
 def _insert_event(conn, ev, state, handled_seq=None):
     conn.execute(
         "INSERT INTO events(id, kind, priority, session_id, emitted_ms, handled_ms, "
@@ -453,7 +518,11 @@ def _insert_event(conn, ev, state, handled_seq=None):
         (str(ev.get("id") or ""), str(ev.get("kind") or ""), str(ev.get("priority") or ""),
          ev.get("sessionId"), int(ev.get("detectedAtMs") or ev.get("emittedAtMs") or 0),
          _int_or_none(ev.get("handledAtMs")), handled_seq, state,
-         _dumps(ev.get("detail") or {}), _dumps(ev)))
+         # The summary, not the full detail: `row_json` already carries the entire
+         # event including its detail, and storing the prose twice was 72% of the
+         # `detail_json` bytes for nothing (nothing reads this column; it exists so a
+         # query can filter on detail fields without parsing the whole row).
+         _dumps(event_summary(ev.get("detail"))), _dumps(ev)))
 
 
 # ------------------------------------------------------------------- export
@@ -615,12 +684,32 @@ def diff_trees(file_root, out_root):
     lp, rp = paths(file_root), paths(out_root)
     diff = {}
 
-    def rows(path):
-        return Counter(_dumps(r) for r in _read_jsonl(path))
+    def match(file_rows, db_rows, allow_slim):
+        """How many file rows the database does not hold, in either legal shape."""
+        pool = Counter(_dumps(r) for r in db_rows)
+        missing, slimmed = 0, 0
+        for row in file_rows:
+            forms = [_dumps(row)]
+            if allow_slim:
+                forms.append(_dumps(slim_event(row)))
+            for form in forms:
+                if pool[form] > 0:
+                    pool[form] -= 1
+                    slimmed += 1 if form != forms[0] else 0
+                    break
+            else:
+                missing += 1
+        return missing, sum(pool.values()), slimmed
 
     for name in ("pending", "handled", "approval_ledger", "dispatch", "sent", "wakes"):
-        a, b = rows(lp[name]), rows(rp[name])
-        diff[name] = {"missing": sum((a - b).values()), "extra": sum((b - a).values())}
+        # A handled event may legitimately be present in its retention shape: the
+        # policy is allowed to drop the prose, and the check must not call that a
+        # lost write. Everything else is compared as written.
+        missing, extra, slimmed = match(_read_jsonl(lp[name]), _read_jsonl(rp[name]),
+                                        allow_slim=(name == "handled"))
+        diff[name] = {"missing": missing, "extra": extra}
+        if slimmed:
+            diff[name]["slimmed"] = slimmed
 
     for name in ("state", "health", "approval_cache", "taskruns"):
         fa, fb = _load_json(lp[name], None), _load_json(rp[name], None)
@@ -738,6 +827,32 @@ def log_failure(module, exc):
 
 
 _conn = None
+
+
+def _atexit_flush():
+    """`PRAGMA optimize` at exit: the documented place for it with short processes.
+
+    Every module here is a short-lived process (a scan, an approval cycle, a wake
+    turn), so there is no long-running connection to optimise on. Closing also runs
+    the WAL checkpoint, which is why `-wal` is normally absent.
+    """
+    global _conn
+    if _conn is None:
+        return
+    try:
+        _conn.execute("PRAGMA optimize")
+        _conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
+    except sqlite3.Error:
+        pass
+    finally:
+        try:
+            _conn.close()
+        except sqlite3.Error:
+            pass
+        _conn = None
+
+
+atexit.register(_atexit_flush)
 
 
 def live_conn(db_path=None):
@@ -1017,6 +1132,156 @@ def write_taskruns(conn, st):
     return {"changed": changed, "tasks": len(tasks)}
 
 
+# ---------------------------------------------------------------- retention
+
+
+#: How many bytes of full event prose to keep in `events`. Age alone does not bound
+#: the table — a flood day (25 events per scan) inflates it — so retention is driven by
+#: both: everything older than `days` loses its prose, and if the survivors still add
+#: up to more than this, the oldest of them go too. Measured on the live database,
+#: 3393 handled rows carried 5.0 MB of `row_json` and 3.6 MB of duplicated
+#: `detail_json`; the file keeps the text forever, so this only bounds the store.
+EVENT_PAYLOAD_BUDGET = 2 * 1024 * 1024
+
+
+def retain(conn, days=30, max_payload_bytes=EVENT_PAYLOAD_BUDGET, now_ms=None, dry=False):
+    """Trim old event payloads: identity and timestamps stay, prose does not.
+
+    Three operations, all idempotent, none of them deletes a row:
+
+      1. **normalise** `detail_json` to the summary everywhere. It used to hold the
+         full `detail`, i.e. the same text as `row_json` — measured on the live
+         database, `detail_json` was 3.6 MB against 5.0 MB of `row_json`.
+      2. **slim by age**: every handled event whose `handled_ms` is older than `days`
+         keeps id/kind/priority/session/timestamps/fold link and a `detail` summary.
+      3. **slim by budget**: if the full-detail survivors still exceed
+         `max_payload_bytes`, the oldest of them are slimmed until they fit. Age alone
+         cannot bound this table (a flood day adds 25 events per scan); a byte budget
+         can, and it degrades gracefully — the newest events are the ones kept whole.
+
+    `inbox/handled.jsonl` is *not* touched: it keeps the full text, and
+    `--export-json` reproduces exactly what the store holds.
+    """
+    now_ms = int(now_ms if now_ms is not None else time.time() * 1000)
+    cutoff = now_ms - int(days * 86400 * 1000)
+    report = {"days": days, "budget_bytes": max_payload_bytes,
+              "normalised": 0, "slimmed_by_age": 0, "slimmed_by_budget": 0,
+              "skipped": 0, "bytes_before": 0, "bytes_after": 0}
+    rows = conn.execute(
+        "SELECT seq, row_json, detail_json, handled_ms, state FROM events").fetchall()
+    report["bytes_before"] = sum(len(r["row_json"]) + len(r["detail_json"]) for r in rows)
+
+    parsed = {}
+    for r in rows:
+        try:
+            parsed[r["seq"]] = json.loads(r["row_json"])
+        except (TypeError, ValueError):
+            report["skipped"] += 1
+
+    def is_old(r):
+        try:
+            handled = int(r["handled_ms"] or 0)
+        except (TypeError, ValueError):
+            return False
+        return handled > 0 and handled < cutoff
+
+    def is_slim(r):
+        return parsed.get(r["seq"], {}).get("_slim") is True
+
+    chosen = {r["seq"] for r in rows
+              if r["state"] == "handled" and r["seq"] in parsed
+              and not is_slim(r) and is_old(r)}
+    report["slimmed_by_age"] = len(chosen)
+    if max_payload_bytes is not None:
+        # Oldest first: what survives the budget is the newest detail.
+        rest = sorted((r for r in rows
+                       if r["state"] == "handled" and r["seq"] in parsed
+                       and not is_slim(r) and r["seq"] not in chosen),
+                      key=lambda r: int(r["handled_ms"] or 0))
+        # `_dumps`, not `len(dict)`: the budget is bytes, and len() on a dict is the
+        # number of keys — which silently made the budget a no-op the first time.
+        used = sum(len(_dumps(parsed[r["seq"]])) for r in rest)
+        for r in rest:
+            if used <= max_payload_bytes:
+                break
+            chosen.add(r["seq"])
+            used -= len(_dumps(parsed[r["seq"]]))
+            report["slimmed_by_budget"] += 1
+
+    plan = []
+    for r in rows:
+        summary = _dumps(event_summary(parsed.get(r["seq"], {}).get("detail")))
+        slim = r["seq"] in chosen
+        row_json = _dumps(slim_event(parsed[r["seq"]])) if slim else r["row_json"]
+        if r["detail_json"] != summary:
+            report["normalised"] += 1
+        elif not slim:
+            report["bytes_after"] += len(r["row_json"]) + len(r["detail_json"])
+            continue
+        report["bytes_after"] += len(row_json) + len(summary)
+        plan.append((row_json, summary, r["seq"]))
+
+    if not dry and plan:
+        with tx(conn):
+            for row_json, summary, seq in plan:
+                conn.execute("UPDATE events SET row_json=?, detail_json=? WHERE seq=?",
+                             (row_json, summary, seq))
+    report["rows_touched"] = len(plan)
+    report["reclaimable_bytes"] = max(0, report["bytes_before"] - report["bytes_after"])
+    report["next"] = "store.py --compact" if plan and not dry else None
+    return report
+
+
+def compact(conn):
+    """Reclaim what retention freed. A one-off maintenance command, not per scan.
+
+    `VACUUM` rewrites the file, so it needs a moment where nothing else is writing;
+    it is also what converts an existing database to `auto_vacuum=INCREMENTAL`
+    (the pragma only takes effect on the next `VACUUM`). Afterwards, later retention
+    runs can be reclaimed incrementally without a rewrite.
+    """
+    before = conn.execute("PRAGMA page_count").fetchone()[0]
+    conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    conn.execute("PRAGMA auto_vacuum=INCREMENTAL")
+    conn.execute("VACUUM")
+    conn.execute("PRAGMA incremental_vacuum")
+    conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    after = conn.execute("PRAGMA page_count").fetchone()[0]
+    return {"pages_before": before, "pages_after": after,
+            "auto_vacuum": conn.execute("PRAGMA auto_vacuum").fetchone()[0]}
+
+
+def probe_ledger(conn, ledger_path, request_id=None):
+    """Exercise the approval ledger's *live* wiring and leave nothing behind.
+
+    The table is empty on this deployment because no approval decision has ever been
+    recorded (neither `state/approvals.jsonl` nor `reports/approvals.md` exists) —
+    which is indistinguishable from "the mirror was never wired". So this writes one
+    probe row through exactly the call `bin/approvals.py` makes, reads it back, and
+    deletes it. A stubbed-out mirror or a wrong live path shows up as `rows_seen: 0`.
+    """
+    rid = request_id or "probe-" + str(int(time.time() * 1000))
+    row = {"ts": time.time(), "at": time.strftime("%Y-%m-%d %H:%M:%S"),
+           "sessionId": "probe", "requestId": rid, "tool": "probe",
+           "action": "probe", "detail": "store.py --probe approval_ledger"}
+    before = conn.execute("SELECT COUNT(*) FROM approval_ledger").fetchone()[0]
+    mirror_at("approvals", append_approval_ledger, ledger_path, "approval_ledger", row)
+    conn2 = connect(conn.execute("PRAGMA database_list").fetchone()[2])
+    try:
+        seen = conn2.execute("SELECT COUNT(*) FROM approval_ledger WHERE request_id=?",
+                             (rid,)).fetchone()[0]
+    finally:
+        conn2.close()
+    if seen:
+        with tx(conn):
+            conn.execute("DELETE FROM approval_ledger WHERE request_id=?", (rid,))
+    after = conn.execute("SELECT COUNT(*) FROM approval_ledger").fetchone()[0]
+    return {"mirror_enabled": enabled("approvals"),
+            "live_path": is_live(ledger_path, "approval_ledger"),
+            "rows_before": before, "rows_seen": seen, "rows_after": after,
+            "cleaned": seen > 0 and after == before}
+
+
 # --------------------------------------------------------------------- stats
 
 
@@ -1037,6 +1302,22 @@ def store_stat(conn=None, root=None):
             out["tables"][name] = conn.execute(f"SELECT COUNT(*) FROM {name}").fetchone()[0]
         out["events_pending"] = conn.execute(
             "SELECT COUNT(*) FROM events WHERE state='pending'").fetchone()[0]
+        out["bytes"] = {}
+        for label, sql in (
+                ("events.row_json", "SELECT SUM(LENGTH(row_json)) FROM events"),
+                ("events.detail_json", "SELECT SUM(LENGTH(detail_json)) FROM events"),
+                ("sessions.state_json", "SELECT SUM(LENGTH(state_json)) FROM sessions"),
+                ("approvals.payload", "SELECT SUM(LENGTH(payload_json)) FROM approvals"),
+                ("wakes.row_json", "SELECT SUM(LENGTH(row_json)) FROM wakes"),
+                ("dispatch.row_json", "SELECT SUM(LENGTH(row_json)) FROM dispatch"),
+                ("sent.row_json", "SELECT SUM(LENGTH(row_json)) FROM sent")):
+            out["bytes"][label] = conn.execute(sql).fetchone()[0] or 0
+        out["pages"] = {"count": conn.execute("PRAGMA page_count").fetchone()[0],
+                        "size": conn.execute("PRAGMA page_size").fetchone()[0],
+                        "freelist": conn.execute("PRAGMA freelist_count").fetchone()[0],
+                        "auto_vacuum": conn.execute("PRAGMA auto_vacuum").fetchone()[0]}
+        out["events_slim"] = conn.execute(
+            "SELECT COUNT(*) FROM events WHERE row_json LIKE '%\"_slim\": true%'").fetchone()[0]
         for label, path in (("db", out["db"]), ("wal", out["db"] + "-wal"),
                             ("shm", out["db"] + "-shm")):
             out["sizes"][label] = os.path.getsize(path) if os.path.exists(path) else 0
@@ -1249,6 +1530,7 @@ def selftest():
 
 
 def main(argv):
+    global DB_PATH
     ap = argparse.ArgumentParser(description="SQLite store for the supervisor's state")
     ap.add_argument("--db", default=DB_PATH)
     ap.add_argument("--root", default=None, help="legacy tree (default: this checkout)")
@@ -1264,9 +1546,25 @@ def main(argv):
     ap.add_argument("--disable", default=None, metavar="MODULES",
                     help="comma-separated module switch to turn off")
     ap.add_argument("--enable", default=None, metavar="MODULES")
+    ap.add_argument("--retain", action="store_true",
+                    help="trim event payloads older than --days (identity is kept)")
+    ap.add_argument("--days", type=float, default=30.0,
+                    help="how many days of full event detail to keep (default 30)")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="with --retain/--compact: report, write nothing")
+    ap.add_argument("--compact", action="store_true",
+                    help="VACUUM: reclaim what --retain freed (one-off)")
+    ap.add_argument("--probe", default=None, choices=[None, "approval_ledger"],
+                    help="exercise one table's live wiring and clean up after itself")
     ap.add_argument("--selftest", action="store_true")
     ap.add_argument("cmd", nargs="?", default=None, choices=[None, "stat", "modules"])
     args = ap.parse_args(argv)
+
+    # Every CLI path must agree on which database it is talking about, including the
+    # ones that go through `live_conn()` (the probe). Without this the probe wrote to
+    # the checkout's own store and then reported `rows_seen: 0` for the `--db` one —
+    # a probe that silently tests the wrong file is worse than no probe.
+    DB_PATH = args.db
 
     if args.selftest:
         return selftest()
@@ -1338,6 +1636,43 @@ def main(argv):
             return 0
         print(f"consistent: {db} agrees with {root} on all {len(LEGACY)} legacy files")
         return 0
+
+    if args.retain:
+        conn = connect(args.db)
+        try:
+            before = store_stat(conn=conn)
+            report = retain(conn, days=args.days, dry=args.dry_run)
+            after = store_stat(conn=conn) if not args.dry_run else before
+        finally:
+            conn.close()
+        report["db_bytes_before"] = before["pages"]["count"] * before["pages"]["size"]
+        report["db_bytes_after"] = after["pages"]["count"] * after["pages"]["size"]
+        report["dry_run"] = bool(args.dry_run)
+        print(json.dumps(report, ensure_ascii=False, indent=1))
+        return 0
+
+    if args.compact:
+        if args.dry_run:
+            print(json.dumps(store_stat(root=args.root)["pages"], ensure_ascii=False))
+            return 0
+        conn = connect(args.db)
+        try:
+            print(json.dumps(compact(conn), ensure_ascii=False))
+        finally:
+            conn.close()
+        return 0
+
+    if args.probe:
+        if args.probe != "approval_ledger":
+            print(f"no probe for {args.probe!r}", file=sys.stderr)
+            return 2
+        conn = connect(args.db)
+        try:
+            report = probe_ledger(conn, paths(args.root or WATCH)["approval_ledger"])
+        finally:
+            conn.close()
+        print(json.dumps(report, ensure_ascii=False, indent=1))
+        return 0 if report["rows_seen"] == 1 and report["cleaned"] else 1
 
     if args.cmd == "stat":
         print(json.dumps(store_stat(root=args.root), ensure_ascii=False, indent=1))

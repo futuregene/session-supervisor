@@ -512,6 +512,114 @@ def consistency_is_one_sided():
           caught.get("wakes", {}).get("missing") == 1, f"missing={caught}")
 
 
+# --------------------------------------------------- 7. retention is lossless in identity
+
+
+def retention_keeps_identity():
+    """Retention may drop the prose; it may not drop the row, or hide it from the check.
+
+    The store's job is the *working set*: `handled.jsonl` is the permanent record and
+    is never rewritten. So the policy is allowed to lose text, and the one thing it
+    must not lose is the ability to answer "did this event happen, for which session,
+    when". Both halves are pinned here, on a tree built for it rather than on the
+    shared fixture (whose timestamps are all the same age).
+    """
+    tmp = tempfile.mkdtemp(prefix="retain-")
+    root = os.path.join(tmp, "root")
+    db = os.path.join(tmp, "r.db")
+    p = store.paths(root)
+    now_ms = 1792111449000
+    day = 86400 * 1000
+    old_ms, young_ms = now_ms - 40 * day, now_ms - day
+    rows = [
+        {"id": "old1", "kind": "awaiting_user", "priority": "medium", "sessionId": "s1",
+         "detectedAtMs": old_ms - 1000, "handledAtMs": old_ms,
+         "detail": {"questionLike": True,
+                    "lastAssistantText": "旧会话的原文，最多一千五百字" * 60}},
+        {"id": "young1", "kind": "awaiting_user", "priority": "low", "sessionId": "s2",
+         "detectedAtMs": young_ms - 1000, "handledAtMs": young_ms,
+         "detail": {"questionLike": False, "lastAssistantText": "新会话的原文" * 60}},
+        {"id": "pending1", "kind": "stalled", "priority": "medium", "sessionId": "s3",
+         "detectedAtMs": now_ms - 500, "detail": {"stalledMs": 900000}},
+    ]
+    store._write_jsonl(p["handled"], rows[:2])
+    store._write_jsonl(p["pending"], rows[2:])
+    conn = store.connect(db)
+    store.import_from_files(conn, root)
+
+    report = store.retain(conn, days=30, max_payload_bytes=None, now_ms=now_ms)
+    got = {r["id"]: json.loads(r["row_json"]) for r in conn.execute(
+        "SELECT id, row_json FROM events")}
+    check("retention slims exactly the rows older than the window",
+          report["slimmed_by_age"] == 1 and got["old1"].get("_slim") is True
+          and "_slim" not in got["young1"] and "_slim" not in got["pending1"],
+          f"age={report['slimmed_by_age']} budget={report['slimmed_by_budget']}")
+    check("a slimmed row keeps who/what/when, and says it was trimmed",
+          got["old1"].get("id") == "old1" and got["old1"].get("kind") == "awaiting_user"
+          and got["old1"].get("sessionId") == "s1"
+          and got["old1"].get("handledAtMs") == old_ms
+          and got["old1"]["detail"].get("questionLike") is True,
+          json.dumps(got["old1"], ensure_ascii=False)[:160])
+    check("the prose is gone from the store",
+          "lastAssistantText" not in json.dumps(got["old1"], ensure_ascii=False)
+          and "lastAssistantText" in json.dumps(got["young1"], ensure_ascii=False))
+    check("the check still finds every row after retention",
+          store.consistency_diff(root, db)["handled"]["missing"] == 0
+          and store.consistency_diff(root, db)["pending"]["missing"] == 0)
+
+    # A row that is actually gone must still be a lost write.
+    gone = conn.execute("DELETE FROM events WHERE id='pending1' AND state='pending'").rowcount
+    diff = store.consistency_diff(root, db)
+    check("a deleted event is still reported missing (retention did not blind the check)",
+          gone == 1 and diff["pending"]["missing"] == 1,
+          f"missing={diff['pending']['missing']}")
+
+    # The byte budget bounds the full-detail payload even when nothing is old: here
+    # the age window is ten years, so only the budget can slim the young row.
+    before = conn.execute(
+        "SELECT SUM(LENGTH(row_json)) FROM events WHERE row_json NOT LIKE '%\"_slim\"%'"
+    ).fetchone()[0]
+    report = store.retain(conn, days=3650, max_payload_bytes=200, now_ms=now_ms)
+    after = conn.execute(
+        "SELECT SUM(LENGTH(row_json)) FROM events WHERE row_json NOT LIKE '%\"_slim\"%'"
+    ).fetchone()[0]
+    check("a byte budget bounds the full-detail payload",
+          report["slimmed_by_budget"] >= 1 and (after or 0) <= 200 and before > 200,
+          f"budget-slimmed={report['slimmed_by_budget']} full-detail {before} -> {after}")
+    conn.close()
+
+
+# --------------------------------------------------------- 8. the mirror is wired
+
+
+#: Every module that writes a mirrored file, and the call that mirrors it. A mirror
+#: that was deleted (or renamed) is invisible at runtime — the file still gets written —
+#: so the wiring is checked against the source instead of trusted.
+WIRING = {
+    "scan.py": ['store.write_events', 'store.write_state', 'store.write_health'],
+    "inbox.py": ['store.mirror_inbox'],
+    "approvals.py": ['store.write_approval_cache', 'store.append_approval_ledger'],
+    "dispatch.py": ['store.append_dispatch', 'store.prune_dispatch'],
+    "taskruns.py": ['store.write_taskruns'],
+    "decide.py": ['store.append_wake'],
+    "guard.py": ['store.append_sent'],
+    "trigger.py": ['store.write_events'],
+    "service_probe.py": ['store.write_events'],
+}
+
+
+def mirror_is_wired():
+    missing = []
+    for name, tokens in WIRING.items():
+        text = open(os.path.join(BIN, name), encoding="utf-8").read()
+        for token in tokens:
+            if token not in text:
+                missing.append(f"{name}: {token}")
+    check("every writer of a mirrored file still calls the store", not missing,
+          ", ".join(missing) or f"{sum(len(v) for v in WIRING.values())} calls in "
+                                f"{len(WIRING)} modules")
+
+
 def main(argv):
     quick = "--quick" in argv
     t0 = time.time()
@@ -527,6 +635,10 @@ def main(argv):
     mirror_actions_export_back()
     print("== 6. the consistency verdict is one-sided")
     consistency_is_one_sided()
+    print("== 7. retention keeps identity, drops prose")
+    retention_keeps_identity()
+    print("== 8. every writer of a mirrored file calls the store")
+    mirror_is_wired()
     print("== fixture round-trip (bin/store.py --selftest)")
     if store.selftest() != 0:
         FAILURES.append("fixture round-trip")

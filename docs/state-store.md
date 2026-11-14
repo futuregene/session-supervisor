@@ -1,93 +1,112 @@
 # state-store.md — 热状态与台账的 SQLite 存储
 
 > **何时读**：怀疑 `state/` 的文件与数据库不一致、要调 `state/store-mode.json` 的开关、
-> 要在本仓改 `bin/scan.py` 等写状态的路径、或要决定"能不能停掉旧文件写入"时。
+> 要改 `bin/scan.py` 等写状态的路径、要跑保留策略或 VACUUM、或要判断一张空表是否该有数据。
 
 ## 为什么有它
 
-`state/state.json` 之前是**整份读、整份写**：扫描每 30 秒跑一轮，就把全部会话的状态重写一遍
-（本部署实测 640 KB / 2738 个会话，约 1.8 GB/天），而每轮真正变化的会话只有个位数。
-`state/approval-cache.json` 同一个形状。台账（`inbox/handled.jsonl`、`state/wakes.jsonl`、
-`state/sent.jsonl`、`state/dispatch.jsonl`）是只追加的，但处理时仍然整份重写或整份扫描。
+`state/state.json` 之前整份读、整份写（扫描每 30 秒一轮，实测 640 KB / 2738 会话，
+约 1.8 GB/天），而每轮真正变化的会话只有个位数；`approval-cache.json` 同一形状。
+数据库把热状态与台账收进来，让**写入量正比于"变化的那几行"**。
 
-数据库把这三类东西收进来，让**写入量正比于"变化的那几行"**，而不是"整个状态"。
-判断标准只有一条，别扩张：**机器记账 → 数据库；人读的记录 → 纯文本**。
-所以 `journal/` `reports/` `.future/memory/` `logs/` **永远不进库**：它们要能 `grep`、
-能被引用为证据、能被后来的人打脸。
+分界只有一条：**机器记账 → 数据库；人读的记录 → 纯文本**。
+`journal/` `reports/` `.future/memory/` `logs/` 永远不进库——要能 `grep`、能当证据、能被推翻。
 
 ## 进库与不进库
 
-| 进库（`state/supervisor.db`） | 表 |
-|---|---|
-| 每会话热状态（`sig`/`emitted`/`lastOrdinal`/…，原样 JSON） | `sessions`、`event_keys` |
-| `lastScanTs` / `deferred` / `peakSessions` 等小键 | `meta` |
-| 事件台账：pending + handled **合成一张**（`state` 区分） | `events` |
-| 事件去重（每会话一个窗口） | `event_keys` |
-| 权限申请缓存 + 自动批准台账 | `approvals`、`approval_ledger` |
-| 派工、已发消息、唤醒记录 | `dispatch`、`sent`、`wakes` |
-| 定时任务复盘的 `last_reviewed_ms` 与计数 | `task_review` |
-| 最近若干轮扫描健康（不再每轮覆盖） | `health` |
-
-不进库：`journal/`、`reports/`、`.future/memory/`、`logs/`、`state/SNAPSHOT.md`。
+进库（`state/supervisor.db`）：`sessions` + `event_keys`（每会话热状态与 25 键去重窗口）、
+`meta`（`lastScanTs`/`deferred`/`peakSessions` 等小键）、`events`（pending 与 handled 合一张，
+`state` 区分）、`approvals` + `approval_ledger`、`dispatch`、`sent`、`wakes`、
+`task_review`（`last_reviewed_ms` 与计数）、`health`（最近 288 轮）。
 
 ## 三步，各自可回退
 
-| 步 | 内容 | "算完成"的判据 | 回退 |
-|---|---|---|---|
-| 1 | 只新增 `bin/store.py`：建库、`--from-json` 导入、`--export-json` 导出 | 导入→导出与原文件**逐语义相等**（`store.py --selftest`） | 没人调用它，什么都不用做 |
-| 2 | 逐模块 dual-write：**先写库、再写旧文件** | 库与旧文件一致，且"文件有、库没有"必须为 0 | `store.py --disable <模块>` |
-| 3 | 停旧写入（读也改走库，旧文件只留导出快照） | 连续若干轮（≥ 一个扫描周期数倍）一致 | `--enable <模块>` 重新打开，或 `--export-json` 回到文件 |
+**步 1** 只新增 `bin/store.py`（建库、`--from-json`、`--export-json`），没人调用它；
+**步 2** 逐模块 dual-write（先写库、再写旧文件），回退是 `--disable <模块>`；
+**步 3** 停旧写入并把读路径改走库，回退是 `--enable` 或 `--export-json`。
+步 1、2 **不改变读取路径**，所以出问题只需关开关，不必回滚代码。
 
-**步 1、2 不改变读取路径**：所有读者照旧读旧文件，所以任何一步出问题只需关开关，
-不需要回滚代码。这是"线上不允许停摆"的具体做法。
+## 写路径的不变式
 
-## 写路径的不变式（读代码时先看这一条）
+1. **先写库、再写旧文件**：于是"文件有、库没有"只可能是镜写失败（缺陷），
+   "库有、文件没有"只是两次写之间的一瞬（正常）。一致性检查按这个不对称判据判定。
+2. **镜写失败只记 `logs/store.log`，不改调用方结果**：旧文件仍是权威，扫描不会因
+   数据库问题停下（同"扫描在跑但一轮也没跑完"那一类事故）。
+3. **临时路径不写库**（`store.is_live`）：selftest 用临时目录时天然不碰线上库。
+4. **首次运行自动播种**：第一次镜写在一个事务里导入旧文件并写 `seeded_at`，
+   两个进程同时启动也只有一个播种成功——部署不需要停机步骤。
+5. **一致性检查先拍文件快照、再读库**，否则"刚写完库、还没写文件"会被误判成丢写。
+6. **每个写文件的模块都必须调用对应的镜写**：`selftest_store.py` 第 8 节直接读源码
+   核对清单（删掉一条镜写，那个检查就红）。运行时看不出来的断线只能这样钉。
 
-1. **先写库、再写旧文件。** 所以"文件有、库没有"只可能是镜写失败 → 缺陷；
-   "库有、文件没有"只是两次写之间的一瞬间 → 正常。一致性检查按这个不对称判据判定，
-   否则检查会在一秒钟的竞态上闪红，然后被人改到什么都不查。
-2. **镜写失败只记日志，不改调用方结果。** `store.mirror()` 吞掉异常并写
-   `logs/store.log`；旧文件仍是权威，扫描不会因为数据库问题停下来
-   （这与"扫描在跑但一轮也没跑完"是同一类事故，见 `docs/gotcha-scan.md`）。
-3. **临时路径不写库。** 每个镜写都拿目标路径与部署自己的路径比一次
-   （`store.is_live`），所以 selftest 用临时目录时天然不会碰线上库，也不需要知道这个模块存在。
-4. **首次运行自动播种。** 第一次镜写时在一个事务里把旧文件导入并写 `seeded_at`，
-   两个进程同时启动也只有一个播种成功。部署不需要停机步骤。
-5. **一致性检查先拍文件快照，再读库。** 判据不对称（见第 1 条），而检查本身不是瞬时：
-   先读库后读文件，就会把"扫描刚写完库、还没写文件"的那一瞬间误判成丢写——
-   线上真出现过一次（`taskruns.lastPollMs`，一秒后同一条检查是绿的）。
-   先拍文件、后导出库，则"文件里有"必然意味着"库早就有了"，误报在结构上不可能发生。
+## 库会怎么长大：保留策略与维护
+
+只有 `events` 会无界增长（一条收件箱事件一行）。它的 `detail` 里带着别的会话的原文
+（`awaiting_user` 最多 1500 字），`detail_json` 一度与 `row_json` **重复存了这份原文**
+（实测 3.6 MB vs 5.0 MB）。所以：
+
+- **`detail_json` 只存摘要**（`questionLike`/`task_id`/`runId`/`action_class`/…），
+  列存在只为查询时不必解析整行；完整事件在 `row_json` 里。
+- **保留策略 = 年龄 + 字节预算**（`store.py --retain`，默认 30 天 / 2 MB）：
+  早于窗口的 handled 事件只留 id/kind/priority/会话/时间戳/折叠链 + `detail` 摘要，
+  行**不删**；若全量明细的存活部分仍超预算，再按最旧优先继续瘦身。
+  年龄管不了体积（扫描一轮最多 25 条，洪水日会翻倍），字节预算能。
+- **`inbox/handled.jsonl` 永不被改写**：完整原文在那里。
+  `--export-json` 导出的是库当前的样子（含瘦身后的行，带 `_slim: true`）。
+- **量级**：3393 行 handled → 瘦身 17.8 MB → **7.7 MB**（`--compact` 后 1890 页）；
+  按约 100 条/天估算，一年后约 3.6 万行、瘦身行约 250 B ≈ **+9 MB/年**。
+- **维护**：`PRAGMA optimize` 在进程退出时跑（`atexit`，短进程的正确位置）；
+  `--compact` 是**一次性** `VACUUM`，同时把已存在的库转成 `auto_vacuum=INCREMENTAL`
+  （新建库直接就是这个设置），之后的瘦身可以用增量回收。
+- **WAL 与 checkpoint**：`journal_mode=WAL`、`busy_timeout=5000`、`synchronous=NORMAL`
+  （`kill -9` 不丢已提交事务；与旧的整份 `os.replace` 同级，OS 崩溃可能丢最后几条）。
+  每个进程退出时关闭连接，SQLite 在最后一个连接关闭时 checkpoint 并把 `-wal` 删掉——
+  这就是"看不到 `-wal` 文件"的原因，不是 checkpoint 被关掉了；长寿连接仍有 1000 页
+  autocheckpoint 兜底。
+
+## 空表怎么判：`--probe`
+
+`approval_ledger` 一直是 0 行。"从没决策过"和"镜写断了"在表上长得一模一样，所以有探针：
+
+```bash
+python3 bin/store.py --probe approval_ledger
+# rows_before / rows_seen / rows_after / cleaned
+```
+
+它走 `bin/approvals.py` 用的**同一处调用**写一行、读回、删掉，`rows_seen: 1` 才算接上。
+零行是正确的条件：`state/approvals.jsonl` 与 `reports/approvals.md` 都不存在（两者都在
+第一次决策时才创建）；否则就是丢写，`store consistency` 也会红。
+
+## 合并之后立刻核两个输出
+
+主检出的 `bin/` 就是线上代码——watchd 每 30 秒 exec 一次，没有暂存区，也没有"部署"这一步。
+所以每次合入后**当场**贴这两样，别等下一次汇报：
+
+```bash
+tail -2 logs/scan.log                     # 要看到本轮的 `[scan] sessions=… events=…`
+python3 bin/store.py --check-consistency   # 要看到 "agrees with … on all 10 legacy files"
+```
+
+代码合法、退出码 0、日志还在写，但什么都没干——这是已经发生过一次的事故形态
+（`docs/gotcha-scan.md`）。
 
 ## 开关与观测
 
 ```bash
-python3 bin/store.py modules                 # 每个模块现在是否在镜写
-python3 bin/store.py --disable inbox         # 只把这一个模块退回旧实现
-python3 bin/store.py --enable inbox
-python3 bin/store.py stat                    # 行数、库/WAL 体积、旧文件体积
-python3 bin/store.py --check-consistency --no-lost      # 线上：库 vs 旧文件
-python3 bin/store.py --export-json /tmp/out  # 回退：导回今天的文件格式
-python3 bin/store.py --selftest              # 夹具 round-trip（CI 可跑）
-python3 bin/selftest_store.py                # 去重等价 / 崩溃 / 并发 / 写放大
+python3 bin/store.py modules                  # 每个模块现在是否在镜写
+python3 bin/store.py --disable inbox | --enable inbox
+python3 bin/store.py stat                     # 行数、逻辑字节、页数、freelist、auto_vacuum
+python3 bin/store.py --retain [--days N] [--dry-run] | --compact
+python3 bin/store.py --check-consistency [--no-lost] | --export-json <dir>
+python3 bin/store.py --probe approval_ledger
+python3 bin/selftest_store.py                 # 去重/崩溃/并发/写放大/保留/接线
 ```
 
-`state/store-mode.json` 就是开关本体（缺省=全开）。它是运行态，不进 git。
-
-## 断言在哪
-
-| 断言 | 位置 |
-|---|---|
-| 导入→导出逐语义相等 | `store.py --selftest`（夹具）、`--check-consistency`（线上） |
-| 每个模块的镜写动作导出回自己的文件 | `selftest_store.py` 第 5 节 |
-| 去重与 `emitted` 窗口等价 | `selftest_store.py` 第 1 节 |
-| 崩溃安全（`kill -9` 中途） | `selftest_store.py` 第 2 节 |
-| 并发无 `database is locked`、`busy_timeout` 真等待 | `selftest_store.py` 第 3 节 |
-| 写放大（O(变化行) vs O(整状态)） | `selftest_store.py` 第 4 节（有线上文件时量线上） |
-| selfcheck 里挂哪两条 | `bin/selfcheck.py` 的 `store selftest` / `store consistency` |
+`state/store-mode.json` 是开关本体（缺省=全开），运行态，不进 git。
+selfcheck 挂两条：`store selftest`、`store consistency`（无线上库时说明后跳过）。
 
 ## 步 3 之前必须想清楚的事
 
-步 3 不是"再改一行"：它把库变成**权威**，读路径也跟着换（`scan.py` 自己、
-`bin/blind.py`、`bin/state_snapshot.py`、`bin/inbox.py` 都要改）。
-它要求**连续若干轮扫描一致**作为前提，因为这类错误（写了一半、看着在写其实没落盘）
+步 3 把库变成**权威**，读路径也要换（`scan.py` 自己、`blind.py`、`state_snapshot.py`、
+`inbox.py`）。它要求**连续若干轮一致**作为前提，因为"写了一半、看着在写其实没落盘"
 只在多次运行后才显形，一次性验证看不见。没有那个观察窗口，就不要动读路径。
