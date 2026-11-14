@@ -1,7 +1,7 @@
 # state-store.md — 热状态与台账的 SQLite 存储
 
 > **何时读**：怀疑 `state/` 的文件与数据库不一致、要调 `state/store-mode.json` 的开关、
-> 要改 `bin/scan.py` 等写状态的路径、要跑保留策略或 VACUUM、或要判断一张空表是否该有数据。
+> 或要改 `bin/scan.py` 等写状态的路径时。要跑保留策略 / VACUUM 读 [state-store-retention.md](state-store-retention.md)。
 
 ## 为什么有它
 
@@ -12,12 +12,9 @@
 分界只有一条：**机器记账 → 数据库；人读的记录 → 纯文本**。
 `journal/` `reports/` `.future/memory/` `logs/` 永远不进库——要能 `grep`、能当证据、能被推翻。
 
-## 进库与不进库
-
-进库（`state/supervisor.db`）：`sessions` + `event_keys`（每会话热状态与 25 键去重窗口）、
-`meta`（`lastScanTs`/`deferred`/`peakSessions` 等小键）、`events`（pending 与 handled 合一张，
-`state` 区分）、`approvals` + `approval_ledger`、`dispatch`、`sent`、`wakes`、
-`task_review`（`last_reviewed_ms` 与计数）、`health`（最近 288 轮）。
+进库：`sessions` + `event_keys`（每会话热状态与 25 键去重窗口）、`meta`（`lastScanTs`/`deferred`/
+`peakSessions` 等小键）、`events`（pending 与 handled 合一张，`state` 区分）、`approvals` +
+`approval_ledger`、`dispatch`、`sent`、`wakes`、`task_review`、`health`（最近 288 轮）。
 
 ## 三步，各自可回退
 
@@ -39,52 +36,14 @@
 6. **每个写文件的模块都必须调用对应的镜写**：`selftest_store.py` 第 8 节直接读源码
    核对清单（删掉一条镜写，那个检查就红）。运行时看不出来的断线只能这样钉。
 
-## 库会怎么长大：保留策略与维护
-
-只有 `events` 会无界增长（一条收件箱事件一行）。它的 `detail` 里带着别的会话的原文
-（`awaiting_user` 最多 1500 字），`detail_json` 一度与 `row_json` **重复存了这份原文**
-（实测 3.6 MB vs 5.0 MB）。所以：
-
-- **`detail_json` 只存摘要**（`questionLike`/`task_id`/`runId`/`action_class`/…），
-  列存在只为查询时不必解析整行；完整事件在 `row_json` 里。
-- **保留策略 = 年龄 + 字节预算**（`store.py --retain`，默认 30 天 / 2 MB）：
-  早于窗口的 handled 事件只留 id/kind/priority/会话/时间戳/折叠链 + `detail` 摘要，
-  行**不删**；若全量明细的存活部分仍超预算，再按最旧优先继续瘦身。
-  年龄管不了体积（扫描一轮最多 25 条，洪水日会翻倍），字节预算能。
-- **`inbox/handled.jsonl` 永不被改写**：完整原文在那里。
-  `--export-json` 导出的是库当前的样子（含瘦身后的行，带 `_slim: true`）。
-- **量级**：3393 行 handled → 瘦身 17.8 MB → **7.7 MB**（`--compact` 后 1890 页）；
-  按约 100 条/天估算，一年后约 3.6 万行、瘦身行约 250 B ≈ **+9 MB/年**。
-- **维护**：`PRAGMA optimize` 在进程退出时跑（`atexit`，短进程的正确位置）；
-  `--compact` 是**一次性** `VACUUM`，同时把已存在的库转成 `auto_vacuum=INCREMENTAL`
-  （新建库直接就是这个设置），之后的瘦身可以用增量回收。
-- **WAL 与 checkpoint**：`journal_mode=WAL`、`busy_timeout=5000`、`synchronous=NORMAL`
-  （`kill -9` 不丢已提交事务；与旧的整份 `os.replace` 同级，OS 崩溃可能丢最后几条）。
-  每个进程退出时关闭连接，SQLite 在最后一个连接关闭时 checkpoint 并把 `-wal` 删掉——
-  这就是"看不到 `-wal` 文件"的原因，不是 checkpoint 被关掉了；长寿连接仍有 1000 页
-  autocheckpoint 兜底。
-
-## 空表怎么判：`--probe`
-
-`approval_ledger` 一直是 0 行。"从没决策过"和"镜写断了"在表上长得一模一样，所以有探针：
-
-```bash
-python3 bin/store.py --probe approval_ledger
-# rows_before / rows_seen / rows_after / cleaned
-```
-
-它走 `bin/approvals.py` 用的**同一处调用**写一行、读回、删掉，`rows_seen: 1` 才算接上。
-零行是正确的条件：`state/approvals.jsonl` 与 `reports/approvals.md` 都不存在（两者都在
-第一次决策时才创建）；否则就是丢写，`store consistency` 也会红。
-
 ## 合并之后立刻核两个输出
 
 主检出的 `bin/` 就是线上代码——watchd 每 30 秒 exec 一次，没有暂存区，也没有"部署"这一步。
 所以每次合入后**当场**贴这两样，别等下一次汇报：
 
 ```bash
-tail -2 logs/scan.log                     # 要看到本轮的 `[scan] sessions=… events=…`
-python3 bin/store.py --check-consistency   # 要看到 "agrees with … on all 10 legacy files"
+tail -2 logs/scan.log                      # 要看到本轮的 `[scan] sessions=… events=…`
+python3 bin/store.py --check-consistency    # 要看到 "agrees with … on all 10 legacy files"
 ```
 
 代码合法、退出码 0、日志还在写，但什么都没干——这是已经发生过一次的事故形态
@@ -96,14 +55,31 @@ python3 bin/store.py --check-consistency   # 要看到 "agrees with … on all 1
 python3 bin/store.py modules                  # 每个模块现在是否在镜写
 python3 bin/store.py --disable inbox | --enable inbox
 python3 bin/store.py stat                     # 行数、逻辑字节、页数、freelist、auto_vacuum
-python3 bin/store.py --retain [--days N] [--dry-run] | --compact
 python3 bin/store.py --check-consistency [--no-lost] | --export-json <dir>
 python3 bin/store.py --probe approval_ledger
 python3 bin/selftest_store.py                 # 去重/崩溃/并发/写放大/保留/接线
 ```
 
 `state/store-mode.json` 是开关本体（缺省=全开），运行态，不进 git。
-selfcheck 挂两条：`store selftest`、`store consistency`（无线上库时说明后跳过）。
+
+**空表怎么判**：`approval_ledger` 曾长期 0 行。"从没决策过"与"镜写断了"在表上长得一样，
+所以有 `--probe`：走 `bin/approvals.py` 用的同一处调用写一行、读回、删掉，`rows_seen: 1` 才算接上。
+零行是正确的条件：`state/approvals.jsonl` 与 `reports/approvals.md` 都不存在（两者都在首次决策时创建）。
+
+## 断言索引
+
+| 断言 | 节 |
+|---|---|
+| 去重：`emitted` 窗口与库逐键同序；录得的事件流重放后发出集合相同 | 1、11 |
+| 崩溃：`kill -9` 中途 ×20，九项不变量逐项计数 | 2 |
+| 并发：三个合成写者；三个**真实**模块（scan / 唤醒 / taskruns） | 3、3b |
+| 写放大：一轮扫描的写入字节与耗时，对比整份文档重写 | 4 |
+| 每个模块的镜写动作导出回自己的文件 | 5 |
+| 一致性判据单向（库领先=正常，文件领先=丢写） | 6 |
+| 每个写文件的模块都调了镜写（读源码核对） | 8 |
+| 瘦身不弄瞎卡片：`TRIAGE_FIELDS` 逐字段相等，只丢正文 | 9 |
+| `approvals.py` 一次决策同时进文件与库 | 10 |
+| selfcheck 挂 `store selftest` / `store consistency` 两条 | `bin/selfcheck.py` |
 
 ## 步 3 之前必须想清楚的事
 

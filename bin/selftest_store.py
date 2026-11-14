@@ -151,96 +151,128 @@ while True:
                          " WHERE id=? AND state='pending'",
                          (i * 10, '{"id": "ev_k%d", "handled": true}' % (i - 1),
                           "ev_k%d" % (i - 1)))
+        # One wake row per step, in the same transaction: a crash must not be able to
+        # leave this wake recorded twice, and a retry must not wake again for it.
+        conn.execute("INSERT INTO wakes(ts, reason, pending, high_medium, row_json)"
+                     " VALUES(?,?,?,?,?)", (i, "step-%d" % i, 1, 0, '{"step": %d}' % i))
     time.sleep(0.002)
 """
 
 
 def crash_safety(rounds=20):
+    """`kill -9` mid-transaction, `rounds` times; each invariant counted on its own.
+
+    The question is not "does it restart" but "which of the promises still hold after
+    a SIGKILL at an arbitrary point inside a write transaction":
+
+      1. `quick_check` — the file is not corrupt;
+      2. no gap — every committed row is there and the ids are contiguous (a lost
+         commit shows up as a gap: this is the "已写入不丢" half);
+      3. handled is a prefix — one transaction per step, so acked events are 1..n-1;
+      4. pending is exactly the last step — nothing was half-applied;
+      5. no row is both handled and pending — an ack cannot half-happen;
+      6. no duplicate wake — one wake row per step, exactly once, even after the kill;
+      7. an acked event never returns to pending;
+      8. acking it twice adds no row;
+      9. the next write still lands (the kill left no lock behind).
+    """
     tmp = tempfile.mkdtemp(prefix="crash-")
     child = os.path.join(tmp, "child.py")
     with open(child, "w", encoding="utf-8") as fh:
         fh.write(CRASH_CHILD)
     rnd = random.Random(424242)
-    stats = {"handled_total": 0, "rows_total": 0, "kills": rounds, "empty": 0}
+    names = ["quick_check", "no_gap", "handled_prefix", "pending_is_last",
+             "never_both", "no_dup_wake", "ack_no_revive", "ack_idempotent",
+             "next_write_lands"]
+    tally = {name: 0 for name in names}
+    empty = 0
     bad = []
+    rows_total = 0
     for it in range(rounds):
-        # A fresh database per round: the point is "a kill leaves a consistent
-        # store", not "a kill resumes the previous round's numbering".
         db = os.path.join(tmp, "c%d.db" % it)
         proc = subprocess.Popen([sys.executable, child, db, BIN],
                                 stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-        # Wait until the child has actually committed something, so "killed before
-        # its first commit" cannot be mistaken for a broken store — on a slow CI
-        # runner a fixed sleep was sometimes shorter than the interpreter's startup.
         deadline = time.time() + 5.0
         while time.time() < deadline and not _count(db):
             time.sleep(0.01)
         time.sleep(rnd.uniform(0.01, 0.12))
         proc.kill()          # SIGKILL: no cleanup, no rollback hook
         proc.wait()
-        err = (proc.stderr.read() or b"").decode("utf-8", "replace")
-        if proc.returncode not in (-9, 137) and err.strip():
-            bad.append(f"round {it}: child died on its own: {err.strip()[:120]}")
+        if proc.returncode not in (-9, 137):
+            bad.append(f"round {it}: child died on its own "
+                       f"({(proc.stderr.read() or b'').decode('utf-8', 'replace')[:120]})")
             continue
         conn = store.connect(db)
         try:
-            quick = conn.execute("PRAGMA quick_check").fetchone()[0]
-            if quick != "ok":
-                bad.append(f"round {it}: quick_check={quick}")
-                continue
+            if conn.execute("PRAGMA quick_check").fetchone()[0] == "ok":
+                tally["quick_check"] += 1
             rows = [(r["id"], r["state"]) for r in conn.execute(
                 "SELECT id, state FROM events ORDER BY CAST(SUBSTR(id, 5) AS INTEGER)")]
             ids = [int(r[0][4:]) for r in rows]
             handled = [int(r[0][4:]) for r in rows if r[1] == "handled"]
             pending = [int(r[0][4:]) for r in rows if r[1] == "pending"]
-            # No gaps: the child's ids are consecutive, so the row set is 1..n.
-            if ids != list(range(1, len(ids) + 1)):
-                bad.append(f"round {it}: id set has a gap or duplicate ({ids[:6]}…)")
+            wakes = [r["reason"] for r in conn.execute("SELECT reason FROM wakes ORDER BY seq")]
             if not ids:
-                # The child was killed before its first commit: nothing to say about
-                # consistency, but it must not happen every round or the test would
-                # be green without ever exercising a commit.
-                stats["empty"] += 1
+                empty += 1
                 continue
-            # One transaction per step: handled is 1..n-1 and pending is exactly {n}.
-            if handled != list(range(1, len(handled) + 1)):
+            rows_total += len(ids)
+            if ids == list(range(1, len(ids) + 1)):
+                tally["no_gap"] += 1
+            else:
+                bad.append(f"round {it}: id set has a gap or duplicate ({ids[:6]}…)")
+            if handled == list(range(1, len(handled) + 1)):
+                tally["handled_prefix"] += 1
+            else:
                 bad.append(f"round {it}: handled is not a prefix ({handled[-3:]})")
-            if len(pending) != 1 or (pending and pending[0] != len(ids)):
+            if len(pending) == 1 and pending[0] == len(ids):
+                tally["pending_is_last"] += 1
+            else:
                 bad.append(f"round {it}: pending={pending[:3]} rows={len(ids)}")
-            if set(handled) & set(pending):
+            if not (set(handled) & set(pending)):
+                tally["never_both"] += 1
+            else:
                 bad.append(f"round {it}: an event is both handled and pending")
-            # An acked event must not come back, and acking twice must be a no-op.
-            if pending:
-                victim = f"ev_k{pending[0]}"
-                conn2 = store.connect(db)
-                # The same handling act twice: the second must be a no-op, not a
-                # second history row (and never a return to pending).
+            want = ["step-%d" % i for i in range(1, len(ids) + 1)]
+            if wakes == want:
+                tally["no_dup_wake"] += 1
+            else:
+                bad.append(f"round {it}: wakes {wakes[-3:]} vs expected {want[-3:]}")
+
+            victim = f"ev_k{pending[0]}"
+            conn2 = store.connect(db)
+            try:
                 store.mark_handled(conn2, [{"id": victim, "handledAtMs": 1792000000000}])
                 store.mark_handled(conn2, [{"id": victim, "handledAtMs": 1792000000000}])
-                after = conn2.execute(
-                    "SELECT state, COUNT(*) FROM events WHERE id=? GROUP BY state",
-                    (victim,)).fetchall()
+                state = [r[0] for r in conn2.execute(
+                    "SELECT state FROM events WHERE id=?", (victim,))]
+                if state == ["handled"]:
+                    tally["ack_no_revive"] += 1
+                else:
+                    bad.append(f"round {it}: acked event state={state}")
                 total = conn2.execute("SELECT COUNT(*) FROM events").fetchone()[0]
-                if [(r[0], r[1]) for r in after] != [("handled", 1)]:
-                    bad.append(f"round {it}: acked event came back: {[tuple(r) for r in after]}")
-                if total != len(ids):
+                if total == len(ids):
+                    tally["ack_idempotent"] += 1
+                else:
                     bad.append(f"round {it}: double ack added a row ({total} vs {len(ids)})")
-                # The next write still lands (no lock left behind by the kill).
-                store.append_wake(conn2, {"ts": time.time(), "reason": "events",
+                store.append_wake(conn2, {"ts": time.time(), "reason": "after-kill",
                                           "pending": 0, "highMedium": 0})
+                landed = conn2.execute(
+                    "SELECT COUNT(*) FROM wakes WHERE reason='after-kill'").fetchone()[0]
+                if landed == 1:
+                    tally["next_write_lands"] += 1
+            finally:
                 conn2.close()
-                stats["handled_total"] += len(handled) + 1
-            stats["rows_total"] += len(ids)
         finally:
             conn.close()
-    check("crash safety (kill -9 mid-transaction)",
-          not bad and stats["empty"] < max(2, rounds // 5),
-          (f"{rounds} kills, 0 violations, rows/round avg "
-           f"{stats['rows_total'] // max(rounds - stats['empty'], 1)}, handled avg "
-           f"{stats['handled_total'] // max(rounds - stats['empty'], 1)}"
-           + (f", {stats['empty']} round(s) died before their first commit"
-              if stats["empty"] else "")) if not bad else "; ".join(bad[:4]))
-    return stats
+
+    avg = rows_total // max(rounds - empty, 1)
+    detail = (f"{rounds} kills, rows/round avg {avg}, "
+              + ", ".join(f"{n} {tally[n]}/{rounds}" for n in names)
+              + (f", {empty} died before its first commit" if empty else ""))
+    ok = (not bad and empty < max(2, rounds // 5)
+          and all(tally[n] >= rounds - empty for n in names))
+    check("crash safety (kill -9 mid-transaction)", ok,
+          detail if not bad else "; ".join(bad[:4]))
 
 
 # ------------------------------------------------------------- 3. concurrency
@@ -338,6 +370,141 @@ def concurrency(rounds=120):
     check("busy_timeout waits for the other writer instead of failing",
           not error and waited >= 0.6,
           f"waited {waited:.2f}s" + (f", {error}" if error else ", no error"))
+
+
+# ------------------------------------- 3b. the three named processes, at the same time
+
+
+FAKE_FUTURE = r'''#!/usr/bin/env python3
+"""A canned `future` CLI: the shapes scan / taskruns / decide ask for, nothing live."""
+import json, sys
+
+args = sys.argv[1:]
+if args[:2] == ["session", "list"]:
+    print(json.dumps({"sessions": [
+        {"id": "s%03d" % i, "sessionName": "会话 %d" % i, "cwd": "/tmp/x",
+         "model": "m", "queryCount": 3, "isStreaming": False,
+         "updatedAtMs": 1792111449000 - i * 1000} for i in range(12)]}))
+elif args[:2] == ["session", "transcript"]:
+    print(json.dumps({"scannedEntries": 2, "ledger": [
+        {"status": "completed", "runId": "r1"}], "entries": [
+        {"kind": "user", "ordinal": 1, "createdAtMs": 1792111000000, "blocks": []},
+        {"kind": "assistant", "ordinal": 2, "createdAtMs": 1792111100000,
+         "blocks": [{"kind": "text", "text": "已停下，等你决定"}]}]}))
+elif args[:2] == ["task", "list"]:
+    print(json.dumps([{"id": "tsk_1", "name": "日报", "trigger": "1h"}]))
+elif args[:2] == ["task", "runs"]:
+    print(json.dumps([{"id": "trn_%d" % i, "status": "completed",
+                       "startedAt": 1792111100000 + i, "promptVersion": 1}
+                      for i in range(3)]))
+elif args[:2] == ["session", "approvals"]:
+    print(json.dumps({"pendingApprovals": []}))
+else:
+    print("{}")
+'''
+
+
+def _sandbox(root, source):
+    """A throwaway WATCH: the real modules, a fake CLI, one stub wake.sh.
+
+    Uses the live files when they are there (so the contention runs against the real
+    sessions), the fixture otherwise. `future` is faked so a test never reads the
+    user's other sessions; `wake.sh` is stubbed so a test never spawns an agent turn —
+    `decide.py` still writes its wake row, which is the write being contended.
+    """
+    import shutil
+    shutil.copytree(os.path.join(WATCH, "bin"), os.path.join(root, "bin"),
+                    ignore=shutil.ignore_patterns("__pycache__"))
+    for name in ("state", "inbox", "logs"):
+        os.makedirs(os.path.join(root, name), exist_ok=True)
+    for name, src in store.paths(source).items():
+        if os.path.exists(src):
+            dst = os.path.join(root, store.LEGACY[name])
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            shutil.copy2(src, dst)
+    cfg_path = os.path.join(root, "bin", "config.json")
+    cfg = json.load(open(cfg_path, encoding="utf-8"))
+    cfg.update({"future_bin": os.path.join(root, "fake-future.py"),
+                "task_watch_enabled": True, "service_probe_enabled": False,
+                "balance_probe_enabled": False, "max_deep_checks_per_scan": 2,
+                "auto_approve": False, "max_events_per_scan": 5,
+                "task_poll_seconds": 0, "task_review_every_runs": 999,
+                "min_wake_gap_seconds": 0, "max_wakes_per_hour": 999,
+                "max_wakes_per_day": 999})
+    json.dump(cfg, open(cfg_path, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
+    fake = os.path.join(root, "fake-future.py")
+    with open(fake, "w", encoding="utf-8") as fh:
+        fh.write(FAKE_FUTURE)
+    os.chmod(fake, 0o755)
+    with open(os.path.join(root, "state", "monitor_session.txt"), "w",
+              encoding="utf-8") as fh:
+        fh.write("monitor-0001")
+    wake = os.path.join(root, "bin", "wake.sh")
+    with open(wake, "w", encoding="utf-8") as fh:
+        fh.write("#!/bin/bash\nexit 0\n")
+    os.chmod(wake, 0o755)
+    return root
+
+
+def live_concurrency(rounds=4):
+    """Three *real* modules writing the same database at the same time.
+
+    `scan.py`, `taskruns.py collect` and a wake turn (`decide.py`) are the three
+    writers the deployment actually has. The synthetic writer test below proves the
+    locking discipline; this one proves the *modules* use it and that a real cycle
+    produces no `database is locked` in any output or in `logs/store.log`.
+    """
+    source = WATCH if os.path.exists(os.path.join(WATCH, "state", "state.json")) else None
+    tmp = tempfile.mkdtemp(prefix="liveconc-")
+    if source is None:
+        store._fixture(os.path.join(tmp, "fx"))
+        source = os.path.join(tmp, "fx")
+    root = _sandbox(os.path.join(tmp, "watch"), source)
+    db = os.path.join(root, "state", "supervisor.db")
+    pending_file = os.path.join(root, "inbox", "pending.jsonl")
+    locked, failures, woke = 0, [], 0
+    for i in range(rounds):
+        # A fresh high-priority event each round: `decide.py` only wakes for news, and
+        # the wake row is the write this test is contending for.
+        with open(pending_file, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps({"id": "ev_conc_%d" % i, "kind": "external",
+                                 "priority": "high", "sessionId": "s000",
+                                 "sessionName": "并发 %d" % i,
+                                 "detectedAtMs": 1792111449000 + i,
+                                 "detail": {"action_class": "observe"}}) + "\n")
+        procs = [
+            ("scan", [sys.executable, os.path.join(root, "bin", "scan.py")]),
+            ("taskruns", [sys.executable, os.path.join(root, "bin", "taskruns.py"),
+                          "collect", "--force"]),
+            ("decide", [sys.executable, os.path.join(root, "bin", "decide.py")]),
+        ]
+        started = [(name, subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                                           stderr=subprocess.PIPE))
+                   for name, cmd in procs]
+        for name, proc in started:
+            out, err = proc.communicate(timeout=180)
+            text = ((out or b"") + (err or b"")).decode("utf-8", "replace")
+            if proc.returncode != 0:
+                failures.append(f"round {i} {name}: exit {proc.returncode} "
+                                f"{text.strip()[-160:]}")
+            if "locked" in text.lower():
+                locked += 1
+    fail_log = os.path.join(root, "logs", "store.log")
+    if os.path.exists(fail_log):
+        text = open(fail_log, encoding="utf-8").read()
+        locked += text.lower().count("locked")
+    decide_log = os.path.join(root, "logs", "decide.log")
+    if os.path.exists(decide_log):
+        woke = open(decide_log, encoding="utf-8").read().count("woke supervisor")
+    conn = store.connect(db)
+    wakes = conn.execute("SELECT COUNT(*) FROM wakes").fetchone()[0]
+    events = conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+    conn.close()
+    check("three real modules at once (scan + wake turn + taskruns), no 'database is locked'",
+          locked == 0 and not failures and wakes >= rounds and events >= rounds,
+          f"{rounds} rounds, lock_errors={locked}, wake rows={wakes}, "
+          f"event rows={events}, decide woke {woke}/{rounds}"
+          + (f" | {failures[:2]}" if failures else ""))
 
 
 # -------------------------------------------------------- 4. write amplification
@@ -620,6 +787,205 @@ def mirror_is_wired():
                                 f"{len(WIRING)} modules")
 
 
+# ------------------------------------ 9. what the wake card reads survives retention
+
+
+def retention_preserves_what_the_card_reads():
+    """Retention must not blind the card. `lastAssistantText` is the only casualty.
+
+    `decide.py` builds the card from `TRIAGE_FIELDS` plus `detail.questionLike` (the
+    quiet rule), `turn_prompt.py` renders exactly that payload, and `bin/peek.py` reads
+    session transcripts from the CLI, never the inbox — so the fields below are the
+    whole surface a slimmed row could break. This compares them field by field, which
+    would fail the moment a field is added to the card and not to `SLIM_FIELDS`.
+    """
+    import decide  # noqa: E402
+
+    row = {"id": "ev_x", "kind": "awaiting_user", "priority": "medium",
+           "sessionId": "s1", "sessionName": "甲会话（60 字以内）", "cwd": "/tmp/repo",
+           "model": "m", "detectedAtMs": 1792111000000, "handledAtMs": 1792112000000,
+           "summary": "已停下，等待用户回复（疑似提问）",
+           "detail": {"questionLike": True, "lastAssistantOrdinal": 657,
+                      "lastAssistantText": "要我做吗？" * 200}}
+    slim = store.slim_event(row)
+    before = {k: row.get(k) for k in decide.TRIAGE_FIELDS}
+    after = {k: slim.get(k) for k in decide.TRIAGE_FIELDS}
+    check("every field the wake card reads survives retention",
+          before == after, f"{before} vs {after}")
+    check("the quiet rule's signal survives retention",
+          slim["detail"].get("questionLike") is True
+          and slim["detail"].get("lastAssistantOrdinal") == 657)
+    lost = set(row["detail"]) - set(slim["detail"])
+    check("the only thing retention drops is the prose",
+          lost == {"lastAssistantText"}, f"dropped={sorted(lost)}")
+    # The point of the policy is that the stored cost stops depending on how much
+    # text the event happened to carry — not an arbitrary ratio.
+    small = dict(row, detail=dict(row["detail"], lastAssistantText="x" * 100))
+    big = dict(row, detail=dict(row["detail"], lastAssistantText="x" * 4000))
+    check("a slimmed row's size no longer depends on the prose it carried",
+          store._dumps(store.slim_event(small)) == store._dumps(store.slim_event(big)),
+          f"{len(store._dumps(store.slim_event(big)))} B either way, "
+          f"was {len(store._dumps(big))} B")
+
+    # Pending events are the card's actual input; retention must never touch them.
+    tmp = tempfile.mkdtemp(prefix="pending-keep-")
+    p = store.paths(tmp)
+    pending = [{"id": "ev_p", "kind": "awaiting_user", "priority": "medium",
+                "sessionId": "s1", "detectedAtMs": 1,
+                "detail": {"questionLike": True, "lastAssistantText": "x" * 500}}]
+    store._write_jsonl(p["pending"], pending)
+    conn = store.connect(os.path.join(tmp, "k.db"))
+    store.import_from_files(conn, tmp)
+    before_row = conn.execute("SELECT row_json FROM events WHERE id='ev_p'").fetchone()[0]
+    store.retain(conn, days=0, max_payload_bytes=0, now_ms=1792111449000)
+    after_row = conn.execute("SELECT row_json FROM events WHERE id='ev_p'").fetchone()[0]
+    conn.close()
+    check("retention never touches a pending event", before_row == after_row)
+
+
+# ------------------------------------------- 10. approvals.py end to end, both stores
+
+
+def approvals_ledger_end_to_end():
+    """A real approval decision through `approvals.py` must reach file *and* database.
+
+    `approval_ledger` has 0 rows in production because no decision has ever been made
+    (neither `state/approvals.jsonl` nor `reports/approvals.md` exists). "Wired but
+    never exercised" is indistinguishable from "not wired", so this drives the module
+    itself — `--dry-run`, so nothing is approved — against a sandbox root and asserts
+    the row lands in both places.
+    """
+    tmp = tempfile.mkdtemp(prefix="appr-")
+    root = os.path.join(tmp, "watch")
+    for name in ("state", "inbox", "logs", "reports"):
+        os.makedirs(os.path.join(root, name), exist_ok=True)
+    import approvals as ap
+
+    saved = {name: getattr(ap, name) for name in ("LEDGER", "REPORT", "CACHE")}
+    saved_store = (store.WATCH, store.DB_PATH, store.MODE_PATH)
+    ap.LEDGER = os.path.join(root, "state", "approvals.jsonl")
+    ap.REPORT = os.path.join(root, "reports", "approvals.md")
+    ap.CACHE = os.path.join(root, "state", "approval-cache.json")
+    store.close()
+    store.WATCH = root
+    store.DB_PATH = os.path.join(root, "state", "supervisor.db")
+    store.MODE_PATH = os.path.join(root, "state", "store-mode.json")
+    store._mode_cache.update({"path": None, "mtime": None, "value": None})
+    real_cfg, real_future = ap.cfg, ap.future
+    ap.cfg = lambda: {"auto_approve": True, "auto_approve_per_cycle": 5,
+                      "auto_approve_per_hour": 20, "max_approval_checks_per_cycle": 10,
+                      "approval_rescan_hours": 2, "exclude_sessions": []}
+
+    class Done:
+        def __init__(self, out="", code=0):
+            self.returncode, self.stdout, self.stderr = code, out, ""
+
+    def fake_future(args, timeout=45):
+        if args[:2] == ["session", "list"]:
+            return 0, json.dumps({"sessions": [
+                {"id": "s1", "sessionName": "甲", "isStreaming": True,
+                 "updatedAtMs": 1792111000000}]}), ""
+        if args[:2] == ["session", "approvals"]:
+            return 0, json.dumps({"pendingApprovals": [
+                {"approval_request_id": "req_1", "tool_name": "bash",
+                 "action": {"tool": "bash", "command": "ls"}}]}), ""
+        return 0, "{}", ""
+
+    ap.future = fake_future
+    try:
+        rc = ap.main(["auto", "--dry-run"])
+        file_rows = store._read_jsonl(ap.LEDGER)
+        conn = store.connect(store.DB_PATH)
+        try:
+            db_rows = [json.loads(r["row_json"]) for r in conn.execute(
+                "SELECT row_json FROM approval_ledger ORDER BY seq")]
+            cache_rows = conn.execute("SELECT COUNT(*) FROM approvals").fetchone()[0]
+        finally:
+            conn.close()
+        check("an approval decision lands in the file", rc == 0 and len(file_rows) == 1
+              and file_rows[0]["requestId"] == "req_1",
+              f"rc={rc} rows={len(file_rows)}")
+        check("…and in the database, row for row",
+              len(db_rows) == len(file_rows) and db_rows
+              and db_rows[0]["requestId"] == file_rows[0]["requestId"]
+              and db_rows[0]["action"] == file_rows[0]["action"],
+              f"db={len(db_rows)} file={len(file_rows)}")
+        check("…and the approval cache too", cache_rows == 1, f"cache rows={cache_rows}")
+    finally:
+        ap.LEDGER, ap.REPORT, ap.CACHE = saved["LEDGER"], saved["REPORT"], saved["CACHE"]
+        ap.cfg, ap.future = real_cfg, real_future
+        store.close()
+        store.WATCH, store.DB_PATH, store.MODE_PATH = saved_store
+        store._mode_cache.update({"path": None, "mtime": None, "value": None})
+
+
+# ------------------------------------- 11. dedupe against the recorded history
+
+
+def dedupe_matches_recorded_history():
+    """The dedupe state of the live files must be *exactly* what the store holds.
+
+    Two checks, both strict:
+      (a) per session, the ordered keys in `event_keys` equal `state.json`'s `emitted`
+          window — not "the same set", the same list, in the same order;
+      (b) replaying the recorded `handled.jsonl` stream through the old list logic and
+          through `dedupe_admit` admits exactly the same events, in the same order.
+    The key *function* is compared to `scan.event_key` separately: this is about the
+    window/eviction algorithm, which is the part that could silently differ.
+    """
+    import scan  # noqa: E402
+
+    live = os.path.join(WATCH, "state", "state.json")
+    if os.path.exists(live):
+        root = WATCH
+        label = "live files"
+    else:
+        root = os.path.join(tempfile.mkdtemp(prefix="dd-"), "fx")
+        store._fixture(root)
+        label = "fixture (no live state on this host)"
+
+    db = os.path.join(tempfile.mkdtemp(prefix="dd-db-"), "d.db")
+    conn = store.connect(db)
+    store.import_from_files(conn, root)
+    state = store._load_json(os.path.join(root, "state", "state.json"), {})
+    mismatched, checked = [], 0
+    for sid, rec in (state.get("sessions") or {}).items():
+        want = [str(k) for k in (rec.get("emitted") or [])][-store.EVENT_KEY_WINDOW:]
+        if not want:
+            continue
+        checked += 1
+        got = [r["key"] for r in conn.execute(
+            "SELECT key FROM event_keys WHERE session_id=? ORDER BY seq", (sid,))]
+        if got != want:
+            mismatched.append(sid)
+    check("the dedupe window equals `emitted`, key for key and in order",
+          not mismatched and checked > 0,
+          f"{label}: {checked} session(s) compared, {len(mismatched)} mismatched")
+
+    # (b) replay the recorded stream
+    rows = store._read_jsonl(os.path.join(root, "inbox", "handled.jsonl"))
+    old = {}
+    admitted_old, admitted_new = [], []
+    for i, row in enumerate(rows):
+        sid = row.get("sessionId") or ""
+        key = scan.event_key(row.get("kind") or "", row.get("detectedAtMs") or "",
+                             row.get("detectedAtMs") or "")
+        seen = old.setdefault(sid, [])
+        is_new_old = key not in seen
+        if is_new_old:
+            seen.append(key)
+            del seen[:-store.EVENT_KEY_WINDOW]
+        admitted_old.append(is_new_old)
+        admitted_new.append(store.dedupe_admit(conn, sid, key, row.get("kind")))
+    conn.close()
+    same = admitted_old == admitted_new
+    check("replaying the recorded stream admits exactly the same events",
+          same and len(rows) > 0,
+          f"{label}: {len(rows)} recorded events, {sum(admitted_old)} admissions, "
+          f"{0 if same else sum(a != b for a, b in zip(admitted_old, admitted_new))} "
+          f"disagreement(s)")
+
+
 def main(argv):
     quick = "--quick" in argv
     t0 = time.time()
@@ -627,8 +993,10 @@ def main(argv):
     dedupe_equivalence()
     print("== 2. crash safety")
     crash_safety(rounds=8 if quick else 20)
-    print("== 3. concurrency")
+    print("== 3. concurrency (synthetic writers)")
     concurrency()
+    print("== 3b. concurrency (the three real modules)")
+    live_concurrency()
     print("== 4. write amplification")
     write_amplification()
     print("== 5. per-module mirror round-trip")
@@ -639,6 +1007,12 @@ def main(argv):
     retention_keeps_identity()
     print("== 8. every writer of a mirrored file calls the store")
     mirror_is_wired()
+    print("== 9. what the wake card reads survives retention")
+    retention_preserves_what_the_card_reads()
+    print("== 10. approvals.py end to end (file + database)")
+    approvals_ledger_end_to_end()
+    print("== 11. dedupe against the recorded history")
+    dedupe_matches_recorded_history()
     print("== fixture round-trip (bin/store.py --selftest)")
     if store.selftest() != 0:
         FAILURES.append("fixture round-trip")

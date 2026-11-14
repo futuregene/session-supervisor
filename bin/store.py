@@ -482,14 +482,18 @@ def _int_or_none(value):
 #: The fields a slimmed event keeps: who/what/when, and the fold link. `detail` is
 #: the only thing the retention policy drops, because it is the only part that is
 #: large, session-private text rather than an index key.
-SLIM_FIELDS = ("id", "kind", "priority", "sessionId", "detectedAtMs", "emittedAtMs",
-               "handledAtMs", "foldedInto", "foldedReason")
+#: What a slimmed event keeps. `sessionName` and `summary` are here because the wake
+#: card's `TRIAGE_FIELDS` are exactly `id/kind/priority/sessionId/sessionName/summary`:
+#: dropping them would leave the card reading `None` for every slimmed event.
+SLIM_FIELDS = ("id", "kind", "priority", "sessionId", "sessionName", "summary",
+               "detectedAtMs", "emittedAtMs", "handledAtMs", "foldedInto", "foldedReason",
+               "model", "cwd")
 
 #: The detail fields worth keeping after the text is gone: they say what the event
 #: *was*, which is what a later reader greps for (`task_id`, `runId`, `questionLike`).
-SUMMARY_FIELDS = ("questionLike", "task_id", "taskId", "runId", "action_class",
-                  "thread_key", "failedRuns", "stalledMs", "lastRunStatus", "transient",
-                  "runsSinceReview", "dueReason", "digest", "cwd", "source")
+SUMMARY_FIELDS = ("questionLike", "lastAssistantOrdinal", "task_id", "taskId", "runId",
+                  "action_class", "thread_key", "failedRuns", "stalledMs", "lastRunStatus",
+                  "transient", "runsSinceReview", "dueReason", "digest", "cwd", "source")
 
 
 def event_summary(detail):
@@ -685,21 +689,40 @@ def diff_trees(file_root, out_root):
     diff = {}
 
     def match(file_rows, db_rows, allow_slim):
-        """How many file rows the database does not hold, in either legal shape."""
-        pool = Counter(_dumps(r) for r in db_rows)
-        missing, slimmed = 0, 0
+        """How many file rows the database does not hold, in any legal shape.
+
+        A handled row may be present (a) as written, (b) in the retention shape the
+        current policy produces, or (c) — when the policy's field list has changed
+        since that row was slimmed — as *some* slim row with the same identity. (c)
+        matters because otherwise widening `SLIM_FIELDS` turns every previously slimmed
+        row into a false "lost write" for a day, and the first person to see that would
+        weaken the check. Identity is `(id, kind, handledAtMs)`, so a deleted row still
+        cannot match; `extra` is counted on the same identity so the two directions of
+        the comparison agree with each other.
+        """
+        def ident(row):
+            return (row.get("id"), row.get("kind"), row.get("handledAtMs"))
+
+        exact = Counter(_dumps(r) for r in db_rows)
+        ids = Counter(ident(r) for r in db_rows)
+        missing = slimmed = 0
         for row in file_rows:
-            forms = [_dumps(row)]
+            if exact[_dumps(row)] > 0:
+                exact[_dumps(row)] -= 1
+                ids[ident(row)] -= 1
+                continue
             if allow_slim:
-                forms.append(_dumps(slim_event(row)))
-            for form in forms:
-                if pool[form] > 0:
-                    pool[form] -= 1
-                    slimmed += 1 if form != forms[0] else 0
-                    break
-            else:
-                missing += 1
-        return missing, sum(pool.values()), slimmed
+                if exact[_dumps(slim_event(row))] > 0:
+                    exact[_dumps(slim_event(row))] -= 1
+                    ids[ident(row)] -= 1
+                    slimmed += 1
+                    continue
+                if ids[ident(row)] > 0:
+                    ids[ident(row)] -= 1
+                    slimmed += 1
+                    continue
+            missing += 1
+        return missing, sum(v for v in ids.values() if v > 0), slimmed
 
     for name in ("pending", "handled", "approval_ledger", "dispatch", "sent", "wakes"):
         # A handled event may legitimately be present in its retention shape: the
