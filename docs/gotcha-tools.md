@@ -389,3 +389,22 @@ Select-String -Path 'rel.txt'                      → 读的是 $PWD 下的那�
 - 判断"卡住"的门槛要用**同一任务的历史用时**做基线（本例 12–40 分钟都出现过），
   别用"我这个模型觉得久"。
 - 凡是"我在某个文件里读到它还没结束"这类结论，先问一句：**这个文件是谁在什么时候写的**。
+
+## 符号链接的 `node_modules` 会让 expo 原生模块解析不到——mobile/desktop 测试要么 `cp -R`，要么别测
+
+实测（一次 mobile 测试准备时）：为了让一个 worktree 跑手机测试，用**符号链接**把主仓的
+`node_modules` 链进来，结果 `TimelineCardChoice`、`AppearanceSettings` 等 **6 个套件**报
+`Cannot find native module 'ExpoClipboard' / 'ExpoLocalization' / 'FileSystem'`。
+换成 `cp -R` 真实副本后**立刻全绿**；同样的套件在主仓一直是绿的。所以报错是**链接造成的**，不是代码问题。
+
+机制：expo 的原生模块解析会沿真实路径找 `node_modules/expo-*`，符号链接让解析停在链接目标之外，
+于是它看不见自己的原生包。**它不是"有时能用"的坑——所有 expo 原生模块都会一起消失**，
+而报错文字（"Cannot find native module"）又很像缺依赖，最容易让人去 `npm install` 一圈。
+
+**做法**：
+- 需要在一个 worktree 里跑 mobile/desktop 测试，就用 `cp -R` 建真实 `node_modules`（慢，但只有这一步能给你真信号）。
+- 收尾时**先 `rm -rf node_modules` 再 `git worktree remove`**：否则删掉工作树会留下指向已删路径的悬空链接，
+  而 `node_modules/@future-os/*` 这类链接是**主检出共享**的——一个人删了临时工作树，这台机器上**所有人**
+  的 mobile/desktop 测试都会 `Cannot find module '@future-os/git-graph'`（修法是把链接重新指向
+  本仓 `packages/`，并清掉已不存在包的残留链接）。
+- 收尾顺手扫一遍：`find node_modules -maxdepth 1 -type l ! -exec test -e {} \; -print`，有输出就说明留下了悬空链接。
