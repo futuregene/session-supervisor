@@ -55,6 +55,7 @@
 - `AGENTS.md` —— **每轮注入**，只放"每轮都必须晓得"的。
 - `POLICY.md` —— 授权口径，**权威**；与本目录冲突时以它为准。
 - `FUTURE.md` + `.future/memory/` —— **本部署**的事实、用户口径、事故史、花费实测（不进 git）。
-- `state/SNAPSHOT.md` —— 运行态快照（我是谁 / 待处理 / 最近动作），回合第一读。
+- `state/SNAPSHOT.md` —— 运行态快照（我是谁 / 最近动作）；只由 `bin/state_snapshot.py` 写入、
+  当前无循环调用，**别当现况读**（现算命令在 `AGENTS.md` 首段）。
 - `journal/` `reports/` —— 发生了什么的记录，不是手册。
 - `.private/profile/` —— **关于用户**（不进 git）；细节见该目录 README。

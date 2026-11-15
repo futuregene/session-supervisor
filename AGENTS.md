@@ -6,8 +6,13 @@
 具体经过有关的，都在 `.future/memory/`，由根目录 `FUTURE.md` 索引。
 
 **任何回合开始前，先按顺序读**：`POLICY.md`（授权边界，最高效力）→ 本文件 →
-`state/SNAPSHOT.md`（接管快照）→ `FUTURE.md`（本部署记忆索引，只写"何时该打开哪一份"）→
+`FUTURE.md`（本部署记忆索引，只写"何时该打开哪一份"）→
 需要打开的 `docs/`（机制）与 `.future/memory/`（实例）。
+
+**待处理量现算，不读快照**：`grep -c '^### ' reports/needs-you.md`（等你拍板的活条目）+
+`bin/inbox.py list --brief --limit 20`（本轮事件）。`state/SNAPSHOT.md` 只由
+`bin/state_snapshot.py` 写入、**没有任何循环调用它**（`grep -rn state_snapshot bin/` 可复核）：
+它那句"待处理：无"是上次生成那一刻的真话，不是现在的。接进 `bin/watchd.sh` 后本段即可删。
 
 ## 1. 知识放哪（读之前先分清）
 
