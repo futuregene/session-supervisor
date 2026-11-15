@@ -19,6 +19,11 @@ nothing to change or execute, the record belongs in journal/reports, not in the
 target's context — a send there starts a run and spends the user's credits to tell
 an agent to do nothing (see `quiet_intent()`; user, 2026-10-16).
 
+Neither is anything relayed into a session whose last turn ended on a choice card
+(see `choice_pending()`; user, 2026-11-16): that session is waiting for the user to
+pick an option, and a relay either answers it by proxy or pushes the question out of
+the way. Refused with exit 7.
+
 `--force` overrides all of these, for a genuine stop order/correction.
 
 A **new feature** gets a **new session**, not a reused one (user, 2026-10-16:
@@ -386,6 +391,64 @@ ACTION_WRITE = "act"
 #: Refusal because of the action class. Distinct from 1/2/3/4/5 so a caller can tell
 #: "this event may not write" from "the target is busy" or "there is no cwd".
 EXIT_ACTION = 6
+
+#: Refusal because the target ended its turn on a choice card the user must answer.
+EXIT_CHOICE = 7
+
+# A choice card is a fenced block whose info string is `futureos-choice` (the same
+# fence `agent/src/prompt/choice.md` teaches the model to emit). Matching the fence
+# rather than the bare word keeps a session that merely *discusses* choice cards from
+# being read as one that is waiting on one — but a session that both discusses and
+# ends on a card is, correctly, waiting.
+CHOICE_FENCE = re.compile(r"^[ \t]*(?:>[ \t]*)*```+[ \t]*futureos-choice\b", re.M)
+
+
+def has_choice_card(text):
+    """`True` when the text carries a `futureos-choice` fence."""
+    return bool(text and CHOICE_FENCE.search(text))
+
+
+def choice_pending(sid):
+    """`True` when the target's last assistant turn ended on a choice card.
+
+    The user's rule (2026-11-16): a session that closes with a single- or
+    multi-select question is waiting for *them*. Relaying into it either answers on
+    their behalf or buries the question under an unrelated instruction, and either
+    way the choice they were going to make is gone. So the relay is refused, and the
+    finding (if there is one) belongs in `journal/`/`reports/`, or in
+    `reports/needs-you.md` when the user has to decide.
+
+    Why the fence and not "does it contain the word": every card is emitted as that
+    fence, so a fence is positive evidence, while prose about cards is not. Why
+    `False` when the transcript cannot be read: same rule as `read_state()` — an
+    unreadable state must not silently pass for "idle". Here "unknown" also must not
+    pass for "blocked", because the consequence would be silently losing every relay
+    while the agent restarts.
+    """
+    rc, out, _ = run(["session", "transcript", "--session", sid, "--runs", "--json"])
+    if rc != 0:
+        return False
+    try:
+        total = int(json.loads(out).get("scannedEntries") or 0)
+    except (ValueError, TypeError):
+        return False
+    if total <= 0:
+        return False
+    cursor = max(0, total - 4)
+    rc, out, _ = run(["session", "transcript", "--session", sid,
+                      "--cursor", str(cursor), "--limit", "4", "--json"])
+    if rc != 0:
+        return False
+    try:
+        entries = json.loads(out).get("entries") or []
+    except (ValueError, TypeError):
+        return False
+    for e in reversed(entries):
+        if e.get("kind") == "assistant":
+            return has_choice_card(
+                " ".join(b.get("text", "") for b in e.get("blocks", [])
+                         if b.get("kind") == "text"))
+    return False
 
 
 def event_action(event_id):
@@ -914,6 +977,21 @@ def main(argv):
               "still gets acked. Pass --force only for a real stop order — when the "
               "target is already acting and must be interrupted.")
         return 5
+
+    # Then the choice-card gate. A target whose last turn ended on a choice card is
+    # waiting for the user to pick one option (user, 2026-11-16). Relaying into it
+    # would answer that card by proxy or push it out of the way, so the answer the
+    # user was about to give never happens. Nothing is lost by staying out: the
+    # question sits in the session the user opened, and anything the supervisor
+    # learned belongs in journal/reports (or reports/needs-you.md when it needs them).
+    if "--force" not in argv and choice_pending(sid):
+        print(f"refused: {sid} ended its last turn on a choice card, which is the "
+              "user's to answer (their rule, 2026-11-16). Do not relay the option "
+              "for them and do not bury the question under another instruction: "
+              "record the finding in journal/ plus reports/decisions/, or add it to "
+              "reports/needs-you.md when the user has to decide. Pass --force only "
+              "for a real stop order.")
+        return EXIT_CHOICE
 
     rc, out, err = run(["session", "info", sid, "--json"])
     log = os.path.join(LOGDIR, f"send-{sid}-{time.strftime('%H%M%S')}.log")

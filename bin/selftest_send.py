@@ -667,6 +667,35 @@ check("and creates nothing",
       [c for c in rec.calls if c[1][:2] == ["session", "new"]], [])
 os.unlink(strict_file)
 
+# --- the choice-card gate (user, 2026-11-16) -------------------------------------
+# A session that closed on a choice card is waiting for the user to pick an option.
+# Relaying into it answers their question by proxy or buries it, so send.py refuses.
+check("a real card is recognised",
+      send.has_choice_card("Done.\n\n```futureos-choice\ntitle: 选哪个？\n"
+                           "option: a | 甲\noption: b | 乙\n```\n"), True)
+check("an indented card inside a list item is recognised",
+      send.has_choice_card("- 选项如下：\n  ```futureos-choice\n  title: 选\n  ```"), True)
+check("a quoted card is recognised",
+      send.has_choice_card("> ```futureos-choice\n> title: 选\n> ```"), True)
+check("prose about cards is not a card",
+      send.has_choice_card("卡片用 ```futureos-choice 这个围栏表示，可选 mode: multi。"), False)
+check("an ordinary fence is not a card",
+      send.has_choice_card("```rust\nfn main() {}\n```"), False)
+check("empty text is not a card", send.has_choice_card(""), False)
+check("the fence must start the block",
+      send.has_choice_card("```ts\n// futureos-choice\n```"), False)
+
+# A pure detector can be fed text; the gate must also be wired into main() on the
+# refusal path, or the detector is a comment with tests.
+_send_src = open(os.path.join(ROOT, "bin", "send.py"), encoding="utf-8").read()
+check("send.py gates on choice_pending", "choice_pending(sid)" in _send_src, True)
+check("and refuses with its own exit code", "EXIT_CHOICE = 7" in _send_src, True)
+_main_at = _send_src.index("def main(argv):")
+check("the gate runs in main() before the target's cwd is resolved",
+      _send_src.index("choice_pending(sid)", _main_at)
+      < _send_src.index("cwd, why = resolve_cwd(sid)", _main_at),
+      True)
+
 if FAILED:
     print("selftest_send: FAILED")
     for line in FAILED:
